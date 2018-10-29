@@ -1,4 +1,4 @@
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,16 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
-import os
-import unittest
-
 from azurelinuxagent.common.exception import HttpError, \
-                                            ProtocolError, \
                                             ResourceGoneError
+
 import azurelinuxagent.common.utils.restutil as restutil
+from azurelinuxagent.common.utils.restutil import HTTP_USER_AGENT
 
 from azurelinuxagent.common.future import httpclient, ustr
 
@@ -88,6 +86,7 @@ class TestIOErrorCounter(AgentTestCase):
            {"hostplugin":0, "protocol":0, "other":0},
             restutil.IOErrorCounter._counts)
 
+
 class TestHttpOperations(AgentTestCase):
     def test_parse_url(self):
         test_uri = "http://abc.def/ghi#hash?jkl=mn"
@@ -117,6 +116,68 @@ class TestHttpOperations(AgentTestCase):
         self.assertEquals(None, host)
         self.assertEquals(rel_uri, "None")
 
+    def test_cleanup_sas_tokens_from_urls_for_normal_cases(self):
+        test_url = "http://abc.def/ghi#hash?jkl=mn"
+        filtered_url = restutil.redact_sas_tokens_in_urls(test_url)
+        self.assertEquals(test_url, filtered_url)
+
+        test_url = "http://abc.def:80/"
+        filtered_url = restutil.redact_sas_tokens_in_urls(test_url)
+        self.assertEquals(test_url, filtered_url)
+
+        test_url = "http://abc.def/"
+        filtered_url = restutil.redact_sas_tokens_in_urls(test_url)
+        self.assertEquals(test_url, filtered_url)
+
+        test_url = "https://abc.def/ghi?jkl=mn"
+        filtered_url = restutil.redact_sas_tokens_in_urls(test_url)
+        self.assertEquals(test_url, filtered_url)
+
+    def test_cleanup_sas_tokens_from_urls_containing_sas_tokens(self):
+        # Contains pair of URLs (RawURL, RedactedURL)
+        urls_tuples = [("https://abc.def.xyz.123.net/functiontest/yokawasa.png?sig"
+                        "=sXBjML1Fpk9UnTBtajo05ZTFSk0LWFGvARZ6WlVcAog%3D&srt=o&ss=b&"
+                        "spr=https&sp=rl&sv=2016-05-31&se=2017-07-01T00%3A21%3A38Z&"
+                        "st=2017-07-01T23%3A16%3A38Z",
+                        "https://abc.def.xyz.123.net/functiontest/yokawasa.png?sig"
+                        "=" + restutil.REDACTED_TEXT +
+                        "&srt=o&ss=b&spr=https&sp=rl&sv=2016-05-31&se=2017-07-01T00"
+                        "%3A21%3A38Z&st=2017-07-01T23%3A16%3A38Z"),
+                       ("https://abc.def.xyz.123.net/?sv=2017-11-09&ss=b&srt=o&sp=r&se=2018-07"
+                        "-26T02:20:44Z&st=2018-07-25T18:20:44Z&spr=https,"
+                        "http&sig=DavQgRtl99DsEPv9Xeb63GnLXCuaLYw5ay%2BE1cFckQY%3D",
+                        "https://abc.def.xyz.123.net/?sv=2017-11-09&ss=b&srt=o&sp=r&se"
+                        "=2018-07-26T02:20:44Z&st=2018-07-25T18:20:44Z&spr=https,"
+                        "http&sig=" + restutil.REDACTED_TEXT),
+                       ("https://abc.def.xyz.123.net/?sv=2017-11-09&ss=b&srt=o&sp=r&se=2018-07"
+                        "-26T02:20:44Z&st=2018-07-25T18:20:44Z&spr=https,"
+                        "http&sig=ttSCKmyjiDEeIzT9q7HtYYgbCRIXuesFSOhNEab52NM%3D",
+                        "https://abc.def.xyz.123.net/?sv=2017-11-09&ss=b&srt=o&sp=r&se"
+                        "=2018-07-26T02:20:44Z&st=2018-07-25T18:20:44Z&spr=https,"
+                        "http&sig=" + restutil.REDACTED_TEXT),
+                       ("https://abc.def.xyz.123.net/?sv=2017-11-09&ss=b&srt=o&sp=r&se=2018-07"
+                        "-26T02:20:42Z&st=2018-07-25T18:20:44Z&spr=https,"
+                        "http&sig=X0imGmcj5KcBPFcqlfYjIZakzGrzONGbRv5JMOnGrwc%3D",
+                        "https://abc.def.xyz.123.net/?sv=2017-11-09&ss=b&srt=o&sp=r&se"
+                        "=2018-07-26T02:20:42Z&st=2018-07-25T18:20:44Z&spr=https,"
+                        "http&sig=" + restutil.REDACTED_TEXT),
+                       ("https://abc.def.xyz.123.net/?sv=2017-11-09&ss=b&srt=o&sp=r&se=2018-07"
+                        "-26T02:20:42Z&st=2018-07-25T18:20:44Z&spr=https,"
+                        "http&sig=9hfxYvaZzrMahtGO1OgMUiFGnDOtZXulZ3skkv1eVBg%3D",
+                        "https://abc.def.xyz.123.net/?sv=2017-11-09&ss=b&srt=o&sp=r&se"
+                        "=2018-07-26T02:20:42Z&st=2018-07-25T18:20:44Z&spr=https,"
+                        "http&sig=" + restutil.REDACTED_TEXT),
+                       ("https://abc.def.xyz.123.net/?sv=2017-11-09&ss=b&srt=o&sp=r&se=2018-07"
+                        "-26T02:20:42Z&st=2018-07-25T18:20:44Z&spr=https"
+                        "&sig=cmluQEHnOGsVK9NDm83ruuPdPWNQcerfjOAbkspNZXU%3D",
+                        "https://abc.def.xyz.123.net/?sv=2017-11-09&ss=b&srt=o&sp=r&se"
+                        "=2018-07-26T02:20:42Z&st=2018-07-25T18:20:44Z&spr=https&sig"
+                        "=" + restutil.REDACTED_TEXT)
+                       ]
+
+        for x in urls_tuples:
+            self.assertEquals(restutil.redact_sas_tokens_in_urls(x[0]), x[1])
+
     @patch('azurelinuxagent.common.conf.get_httpproxy_port')
     @patch('azurelinuxagent.common.conf.get_httpproxy_host')
     def test_get_http_proxy_none_is_default(self, mock_host, mock_port):
@@ -134,8 +195,8 @@ class TestHttpOperations(AgentTestCase):
         h, p = restutil._get_http_proxy()
         self.assertEqual("host", h)
         self.assertEqual(None, p)
-        mock_host.assert_called_once()
-        mock_port.assert_called_once()
+        self.assertEqual(1, mock_host.call_count)
+        self.assertEqual(1, mock_port.call_count)
 
     @patch('azurelinuxagent.common.conf.get_httpproxy_port')
     @patch('azurelinuxagent.common.conf.get_httpproxy_host')
@@ -145,8 +206,8 @@ class TestHttpOperations(AgentTestCase):
         h, p = restutil._get_http_proxy()
         self.assertEqual(None, h)
         self.assertEqual(None, p)
-        mock_host.assert_called_once()
-        mock_port.assert_not_called()
+        self.assertEqual(1, mock_host.call_count)
+        self.assertEqual(0, mock_port.call_count)
 
     @patch('azurelinuxagent.common.conf.get_httpproxy_host')
     def test_get_http_proxy_http_uses_httpproxy(self, mock_host):
@@ -197,9 +258,9 @@ class TestHttpOperations(AgentTestCase):
         ])
         HTTPSConnection.assert_not_called()
         mock_conn.request.assert_has_calls([
-            call(method="GET", url="/bar", body=None, headers={})
+            call(method="GET", url="/bar", body=None, headers={'User-Agent': HTTP_USER_AGENT, 'Connection': 'close'})
         ])
-        mock_conn.getresponse.assert_called_once()
+        self.assertEqual(1, mock_conn.getresponse.call_count)
         self.assertNotEquals(None, resp)
         self.assertEquals("TheResults", resp.read())
 
@@ -220,9 +281,9 @@ class TestHttpOperations(AgentTestCase):
             call("foo", 443, timeout=10)
         ])
         mock_conn.request.assert_has_calls([
-            call(method="GET", url="/bar", body=None, headers={})
+            call(method="GET", url="/bar", body=None, headers={'User-Agent': HTTP_USER_AGENT, 'Connection': 'close'})
         ])
-        mock_conn.getresponse.assert_called_once()
+        self.assertEqual(1, mock_conn.getresponse.call_count)
         self.assertNotEquals(None, resp)
         self.assertEquals("TheResults", resp.read())
 
@@ -244,9 +305,9 @@ class TestHttpOperations(AgentTestCase):
         ])
         HTTPSConnection.assert_not_called()
         mock_conn.request.assert_has_calls([
-            call(method="GET", url="http://foo:80/bar", body=None, headers={})
+            call(method="GET", url="http://foo:80/bar", body=None, headers={'User-Agent': HTTP_USER_AGENT, 'Connection': 'close'})
         ])
-        mock_conn.getresponse.assert_called_once()
+        self.assertEqual(1, mock_conn.getresponse.call_count)
         self.assertNotEquals(None, resp)
         self.assertEquals("TheResults", resp.read())
 
@@ -269,9 +330,9 @@ class TestHttpOperations(AgentTestCase):
             call("foo.bar", 23333, timeout=10)
         ])
         mock_conn.request.assert_has_calls([
-            call(method="GET", url="https://foo:443/bar", body=None, headers={})
+            call(method="GET", url="https://foo:443/bar", body=None, headers={'User-Agent': HTTP_USER_AGENT, 'Connection': 'close'})
         ])
-        mock_conn.getresponse.assert_called_once()
+        self.assertEqual(1, mock_conn.getresponse.call_count)
         self.assertNotEquals(None, resp)
         self.assertEquals("TheResults", resp.read())
 
@@ -391,9 +452,9 @@ class TestHttpOperations(AgentTestCase):
 
     @patch("time.sleep")
     @patch("azurelinuxagent.common.utils.restutil._http_request")
-    def test_http_request_raises_for_bad_request(self, _http_request, _sleep):
+    def test_http_request_raises_for_resource_gone(self, _http_request, _sleep):
         _http_request.side_effect = [
-            Mock(status=httpclient.BAD_REQUEST)
+            Mock(status=httpclient.GONE)
         ]
 
         self.assertRaises(ResourceGoneError, restutil.http_get, "https://foo.bar")
@@ -401,9 +462,12 @@ class TestHttpOperations(AgentTestCase):
 
     @patch("time.sleep")
     @patch("azurelinuxagent.common.utils.restutil._http_request")
-    def test_http_request_raises_for_resource_gone(self, _http_request, _sleep):
+    def test_http_request_raises_for_invalid_container_configuration(self, _http_request, _sleep):
+        def read():
+            return b'{ "errorCode": "InvalidContainerConfiguration", "message": "Invalid request." }'
+
         _http_request.side_effect = [
-            Mock(status=httpclient.GONE)
+            Mock(status=httpclient.BAD_REQUEST, reason='Bad Request', read=read)
         ]
 
         self.assertRaises(ResourceGoneError, restutil.http_get, "https://foo.bar")

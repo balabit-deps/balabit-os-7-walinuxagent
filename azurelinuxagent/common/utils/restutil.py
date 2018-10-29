@@ -1,6 +1,6 @@
 # Microsoft Azure Linux Agent
 #
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
 import os
+import re
 import threading
 import time
 import traceback
@@ -28,8 +29,7 @@ import azurelinuxagent.common.utils.textutil as textutil
 
 from azurelinuxagent.common.exception import HttpError, ResourceGoneError
 from azurelinuxagent.common.future import httpclient, urlparse, ustr
-from azurelinuxagent.common.version import PY_VERSION_MAJOR
-
+from azurelinuxagent.common.version import PY_VERSION_MAJOR, AGENT_NAME, GOAL_STATE_AGENT_VERSION
 
 SECURE_WARNING_EMITTED = False
 
@@ -38,6 +38,9 @@ DELAY_IN_SECONDS = 1
 
 THROTTLE_RETRIES = 25
 THROTTLE_DELAY_IN_SECONDS = 1
+
+REDACTED_TEXT = "<SAS_SIGNATURE>"
+SAS_TOKEN_RETRIEVAL_REGEX = re.compile(r'^(https?://[a-zA-Z0-9.].*sig=)([a-zA-Z0-9%-]*)(.*)$')
 
 RETRY_CODES = [
     httpclient.RESET_CONTENT,
@@ -49,11 +52,10 @@ RETRY_CODES = [
     httpclient.SERVICE_UNAVAILABLE,
     httpclient.GATEWAY_TIMEOUT,
     httpclient.INSUFFICIENT_STORAGE,
-    429, # Request Rate Limit Exceeded
+    429,  # Request Rate Limit Exceeded
 ]
 
 RESOURCE_GONE_CODES = [
-    httpclient.BAD_REQUEST,
     httpclient.GONE
 ]
 
@@ -61,6 +63,10 @@ OK_CODES = [
     httpclient.OK,
     httpclient.CREATED,
     httpclient.ACCEPTED
+]
+
+HOSTPLUGIN_UPSTREAM_FAILURE_CODES = [
+    502
 ]
 
 THROTTLE_CODES = [
@@ -78,8 +84,11 @@ RETRY_EXCEPTIONS = [
 
 HTTP_PROXY_ENV = "http_proxy"
 HTTPS_PROXY_ENV = "https_proxy"
+HTTP_USER_AGENT = "{0}/{1}".format(AGENT_NAME, GOAL_STATE_AGENT_VERSION)
+HTTP_USER_AGENT_HEALTH = "{0}+health".format(HTTP_USER_AGENT)
+INVALID_CONTAINER_CONFIGURATION = "InvalidContainerConfiguration"
 
-DEFAULT_PROTOCOL_ENDPOINT='168.63.129.16'
+DEFAULT_PROTOCOL_ENDPOINT = '168.63.129.16'
 HOST_PLUGIN_PORT = 32526
 
 
@@ -122,14 +131,26 @@ def _compute_delay(retry_attempt=1, delay=DELAY_IN_SECONDS):
         fib = (fib[1], fib[0]+fib[1])
     return delay*fib[1]
 
+
 def _is_retry_status(status, retry_codes=RETRY_CODES):
     return status in retry_codes
+
 
 def _is_retry_exception(e):
     return len([x for x in RETRY_EXCEPTIONS if isinstance(e, x)]) > 0
 
+
 def _is_throttle_status(status):
     return status in THROTTLE_CODES
+
+
+def _is_invalid_container_configuration(response):
+    result = False
+    if response is not None and response.status == httpclient.BAD_REQUEST:
+        error_detail = read_response_error(response)
+        result = INVALID_CONTAINER_CONFIGURATION in error_detail
+    return result
+
 
 def _parse_url(url):
     o = urlparse(url)
@@ -166,39 +187,46 @@ def _get_http_proxy(secure=False):
     return host, port
 
 
+def redact_sas_tokens_in_urls(url):
+    return SAS_TOKEN_RETRIEVAL_REGEX.sub(r"\1" + REDACTED_TEXT + r"\3", url)
+
+
 def _http_request(method, host, rel_uri, port=None, data=None, secure=False,
                   headers=None, proxy_host=None, proxy_port=None):
 
     headers = {} if headers is None else headers
+    headers['Connection'] = 'close'
+
     use_proxy = proxy_host is not None and proxy_port is not None
 
     if port is None:
         port = 443 if secure else 80
 
+    if 'User-Agent' not in headers:
+        headers['User-Agent'] = HTTP_USER_AGENT
+
     if use_proxy:
         conn_host, conn_port = proxy_host, proxy_port
         scheme = "https" if secure else "http"
         url = "{0}://{1}:{2}{3}".format(scheme, host, port, rel_uri)
-
     else:
         conn_host, conn_port = host, port
         url = rel_uri
 
     if secure:
         conn = httpclient.HTTPSConnection(conn_host,
-                                        conn_port,
-                                        timeout=10)
+                                          conn_port,
+                                          timeout=10)
         if use_proxy:
             conn.set_tunnel(host, port)
-
     else:
         conn = httpclient.HTTPConnection(conn_host,
-                                        conn_port,
-                                        timeout=10)
+                                         conn_port,
+                                         timeout=10)
 
     logger.verbose("HTTP connection [{0}] [{1}] [{2}] [{3}]",
                    method,
-                   url,
+                   redact_sas_tokens_in_urls(url),
                    data,
                    headers)
 
@@ -293,8 +321,7 @@ def http_request(method,
 
             if request_failed(resp):
                 if _is_retry_status(resp.status, retry_codes=retry_codes):
-                    msg = '[HTTP Retry] {0} {1} -- Status Code {2}'.format(
-                        method, url, resp.status)
+                    msg = '[HTTP Retry] {0} {1} -- Status Code {2}'.format(method, url, resp.status)
                     # Note if throttled and ensure a safe, minimum number of
                     # retry attempts
                     if _is_throttle_status(resp.status):
@@ -305,28 +332,38 @@ def http_request(method,
             if resp.status in RESOURCE_GONE_CODES:
                 raise ResourceGoneError()
 
+            # Map invalid container configuration errors to resource gone in
+            # order to force a goal state refresh, which in turn updates the
+            # container-id header passed to HostGAPlugin.
+            # See #1294.
+            if _is_invalid_container_configuration(resp):
+                raise ResourceGoneError()
+
             return resp
 
         except httpclient.HTTPException as e:
-            msg = '[HTTP Failed] {0} {1} -- HttpException {2}'.format(
-                method, url, e)
+            clean_url = redact_sas_tokens_in_urls(url)
+            msg = '[HTTP Failed] {0} {1} -- HttpException {2}'.format(method, clean_url, e)
             if _is_retry_exception(e):
                 continue
             break
 
         except IOError as e:
             IOErrorCounter.increment(host=host, port=port)
-            msg = '[HTTP Failed] {0} {1} -- IOError {2}'.format(
-                method, url, e)
+            clean_url = redact_sas_tokens_in_urls(url)
+            msg = '[HTTP Failed] {0} {1} -- IOError {2}'.format(method, clean_url, e)
             continue
 
-    raise HttpError("{0} -- {1} attempts made".format(msg,attempt))
+    raise HttpError("{0} -- {1} attempts made".format(msg, attempt))
 
 
-def http_get(url, headers=None, use_proxy=False,
-                max_retry=DEFAULT_RETRIES,
-                retry_codes=RETRY_CODES,
-                retry_delay=DELAY_IN_SECONDS):
+def http_get(url,
+             headers=None,
+             use_proxy=False,
+             max_retry=DEFAULT_RETRIES,
+             retry_codes=RETRY_CODES,
+             retry_delay=DELAY_IN_SECONDS):
+
     return http_request("GET",
                         url, None, headers=headers,
                         use_proxy=use_proxy,
@@ -335,10 +372,13 @@ def http_get(url, headers=None, use_proxy=False,
                         retry_delay=retry_delay)
 
 
-def http_head(url, headers=None, use_proxy=False,
-                max_retry=DEFAULT_RETRIES,
-                retry_codes=RETRY_CODES,
-                retry_delay=DELAY_IN_SECONDS):
+def http_head(url,
+              headers=None,
+              use_proxy=False,
+              max_retry=DEFAULT_RETRIES,
+              retry_codes=RETRY_CODES,
+              retry_delay=DELAY_IN_SECONDS):
+
     return http_request("HEAD",
                         url, None, headers=headers,
                         use_proxy=use_proxy,
@@ -347,10 +387,14 @@ def http_head(url, headers=None, use_proxy=False,
                         retry_delay=retry_delay)
 
 
-def http_post(url, data, headers=None, use_proxy=False,
-                max_retry=DEFAULT_RETRIES,
-                retry_codes=RETRY_CODES,
-                retry_delay=DELAY_IN_SECONDS):
+def http_post(url,
+              data,
+              headers=None,
+              use_proxy=False,
+              max_retry=DEFAULT_RETRIES,
+              retry_codes=RETRY_CODES,
+              retry_delay=DELAY_IN_SECONDS):
+
     return http_request("POST",
                         url, data, headers=headers,
                         use_proxy=use_proxy,
@@ -359,10 +403,14 @@ def http_post(url, data, headers=None, use_proxy=False,
                         retry_delay=retry_delay)
 
 
-def http_put(url, data, headers=None, use_proxy=False,
-                max_retry=DEFAULT_RETRIES,
-                retry_codes=RETRY_CODES,
-                retry_delay=DELAY_IN_SECONDS):
+def http_put(url,
+             data,
+             headers=None,
+             use_proxy=False,
+             max_retry=DEFAULT_RETRIES,
+             retry_codes=RETRY_CODES,
+             retry_delay=DELAY_IN_SECONDS):
+
     return http_request("PUT",
                         url, data, headers=headers,
                         use_proxy=use_proxy,
@@ -371,10 +419,13 @@ def http_put(url, data, headers=None, use_proxy=False,
                         retry_delay=retry_delay)
 
 
-def http_delete(url, headers=None, use_proxy=False,
+def http_delete(url,
+                headers=None,
+                use_proxy=False,
                 max_retry=DEFAULT_RETRIES,
                 retry_codes=RETRY_CODES,
                 retry_delay=DELAY_IN_SECONDS):
+
     return http_request("DELETE",
                         url, None, headers=headers,
                         use_proxy=use_proxy,
@@ -382,11 +433,21 @@ def http_delete(url, headers=None, use_proxy=False,
                         retry_codes=retry_codes,
                         retry_delay=retry_delay)
 
+
 def request_failed(resp, ok_codes=OK_CODES):
     return not request_succeeded(resp, ok_codes=ok_codes)
 
+
 def request_succeeded(resp, ok_codes=OK_CODES):
     return resp is not None and resp.status in ok_codes
+
+
+def request_failed_at_hostplugin(resp, upstream_failure_codes=HOSTPLUGIN_UPSTREAM_FAILURE_CODES):
+    """
+    Host plugin will return 502 for any upstream issue, so a failure is any 5xx except 502
+    """
+    return resp is not None and resp.status >= 500 and resp.status not in upstream_failure_codes
+
 
 def read_response_error(resp):
     result = ''

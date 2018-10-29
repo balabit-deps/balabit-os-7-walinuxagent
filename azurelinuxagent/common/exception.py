@@ -1,6 +1,6 @@
 # Microsoft Azure Linux Agent
 #
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 """
 Defines all exceptions
@@ -44,7 +44,7 @@ class AgentConfigError(AgentError):
 
 class AgentNetworkError(AgentError):
     """
-    When network is not avaiable.
+    When network is not available\.
     """
 
     def __init__(self, msg=None, inner=None):
@@ -56,8 +56,9 @@ class ExtensionError(AgentError):
     When failed to execute an extension
     """
 
-    def __init__(self, msg=None, inner=None):
+    def __init__(self, msg=None, inner=None, code=-1):
         super(ExtensionError, self).__init__(msg, inner)
+        self.code = code
 
 
 class ProvisionError(AgentError):
@@ -85,6 +86,7 @@ class DhcpError(AgentError):
 
     def __init__(self, msg=None, inner=None):
         super(DhcpError, self).__init__(msg, inner)
+
 
 class OSUtilError(AgentError):
     """
@@ -158,3 +160,12 @@ class ResourceGoneError(HttpError):
         if msg is None:
             msg = "Resource is gone"
         super(ResourceGoneError, self).__init__(msg, inner)
+
+
+class RemoteAccessError(AgentError):
+    """
+    Remote Access Error
+    """
+
+    def __init__(self, msg=None, inner=None):
+        super(RemoteAccessError, self).__init__(msg, inner)

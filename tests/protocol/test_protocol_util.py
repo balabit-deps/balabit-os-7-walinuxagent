@@ -1,4 +1,4 @@
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
 from tests.tools import *
@@ -60,7 +60,7 @@ class TestProtocolUtil(AgentTestCase):
         tag_file = os.path.join(self.tmp_dir, TAG_FILE_NAME)
 
         #Test tag file doesn't exist
-        protocol_util.get_protocol_by_file()
+        protocol_util.get_protocol(by_file=True)
         protocol_util._detect_wire_protocol.assert_any_call()
         protocol_util._detect_metadata_protocol.assert_not_called()
 
@@ -71,7 +71,7 @@ class TestProtocolUtil(AgentTestCase):
         with open(tag_file, "w+") as tag_fd:
             tag_fd.write("")
 
-        protocol_util.get_protocol_by_file()
+        protocol_util.get_protocol(by_file=True)
         protocol_util._detect_metadata_protocol.assert_any_call()
         protocol_util._detect_wire_protocol.assert_not_called()
 

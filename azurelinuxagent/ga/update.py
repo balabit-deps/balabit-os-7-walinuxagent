@@ -1,6 +1,6 @@
 # Windows Azure Linux Agent
 #
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,13 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
 import glob
 import json
 import os
 import platform
+import random
 import re
 import shutil
 import signal
@@ -71,10 +72,11 @@ CHILD_POLL_INTERVAL = 60
 MAX_FAILURE = 3 # Max failure allowed for agent before blacklisted
 
 GOAL_STATE_INTERVAL = 3
+GOAL_STATE_INTERVAL_DISABLED = 5 * 60
 
 ORPHAN_WAIT_INTERVAL = 15 * 60
 
-AGENT_SENTINAL_FILE = "current_version"
+AGENT_SENTINEL_FILE = "current_version"
 
 READONLY_FILE_GLOBS = [
     "*.crt",
@@ -83,6 +85,7 @@ READONLY_FILE_GLOBS = [
     "*.prv",
     "ovf-env.xml"
 ]
+
 
 def get_update_handler():
     return UpdateHandler()
@@ -175,7 +178,11 @@ class UpdateHandler(object):
             start_time = time.time()
             while (time.time() - start_time) < CHILD_HEALTH_INTERVAL:
                 time.sleep(poll_interval)
-                ret = self.child_process.poll()
+                try:
+                    ret = self.child_process.poll()
+                except OSError:
+                    # if child_process has terminated, calling poll could raise an exception
+                    ret = -1
                 if ret is not None:
                     break
 
@@ -189,7 +196,8 @@ class UpdateHandler(object):
                     version=agent_version,
                     op=WALAEventOperation.Enable,
                     is_success=True,
-                    message=msg)
+                    message=msg,
+                    log_event=False)
 
                 if ret is None:
                     ret = self.child_process.wait()
@@ -224,12 +232,13 @@ class UpdateHandler(object):
                     agent_cmd,
                     ustr(e))
                 logger.warn(msg)
+                detailed_message = '{0} {1}'.format(msg, traceback.format_exc())
                 add_event(
                     AGENT_NAME,
                     version=agent_version,
                     op=WALAEventOperation.Enable,
                     is_success=False,
-                    message=msg)
+                    message=detailed_message)
                 if latest_agent is not None:
                     latest_agent.mark_failure(is_fatal=True)
 
@@ -247,25 +256,42 @@ class UpdateHandler(object):
 
             # Launch monitoring threads
             from azurelinuxagent.ga.monitor import get_monitor_handler
-            get_monitor_handler().run()
+            monitor_thread = get_monitor_handler()
+            monitor_thread.run()
 
             from azurelinuxagent.ga.env import get_env_handler
-            get_env_handler().run()
+            env_thread = get_env_handler()
+            env_thread.run()
 
             from azurelinuxagent.ga.exthandlers import get_exthandlers_handler, migrate_handler_state
             exthandlers_handler = get_exthandlers_handler()
             migrate_handler_state()
+
+            from azurelinuxagent.ga.remoteaccess import get_remote_access_handler
+            remote_access_handler = get_remote_access_handler()
 
             self._ensure_no_orphans()
             self._emit_restart_event()
             self._ensure_partition_assigned()
             self._ensure_readonly_files()
 
+            goal_state_interval = GOAL_STATE_INTERVAL \
+                if conf.get_extensions_enabled() \
+                else GOAL_STATE_INTERVAL_DISABLED
+
             while self.running:
                 if self._is_orphaned:
                     logger.info("Agent {0} is an orphan -- exiting",
                                 CURRENT_AGENT)
                     break
+
+                if not monitor_thread.is_alive():
+                    logger.warn(u"Monitor thread died, restarting")
+                    monitor_thread.start()
+
+                if not env_thread.is_alive():
+                    logger.warn(u"Environment thread died, restarting")
+                    env_thread.start()
 
                 if self._upgrade_available():
                     available_agent = self.get_latest_agent()
@@ -285,24 +311,25 @@ class UpdateHandler(object):
                 last_etag = exthandlers_handler.last_etag
                 exthandlers_handler.run()
 
+                remote_access_handler.run()
+
                 if last_etag != exthandlers_handler.last_etag:
                     self._ensure_readonly_files()
+                    duration = elapsed_milliseconds(utc_start)
+                    logger.info('ProcessGoalState completed [incarnation {0}; {1} ms]',
+                                exthandlers_handler.last_etag,
+                                duration)
                     add_event(
                         AGENT_NAME,
-                        version=CURRENT_VERSION,
                         op=WALAEventOperation.ProcessGoalState,
-                        is_success=True,
-                        duration=elapsed_milliseconds(utc_start),
-                        message="Incarnation {0}".format(
-                                            exthandlers_handler.last_etag),
-                        log_event=True)
+                        duration=duration,
+                        message="Incarnation {0}".format(exthandlers_handler.last_etag))
 
-                time.sleep(GOAL_STATE_INTERVAL)
+                time.sleep(goal_state_interval)
 
         except Exception as e:
-            msg = u"Agent {0} failed with exception: {1}".format(
-                CURRENT_AGENT, ustr(e))
-            self._set_sentinal(msg=msg)
+            msg = u"Agent {0} failed with exception: {1}".format(CURRENT_AGENT, ustr(e))
+            self._set_sentinel(msg=msg)
             logger.warn(msg)
             logger.warn(traceback.format_exc())
             sys.exit(1)
@@ -313,12 +340,7 @@ class UpdateHandler(object):
         sys.exit(0)
 
     def forward_signal(self, signum, frame):
-        # Note:
-        #  - At present, the handler is registered only for SIGTERM.
-        #    However, clean shutdown is both SIGTERM and SIGKILL.
-        #    A SIGKILL handler is not being registered at this time to
-        #    minimize perturbing the code.
-        if signum in (signal.SIGTERM, signal.SIGKILL):
+        if signum == signal.SIGTERM:
             self._shutdown()
 
         if self.child_process is None:
@@ -329,13 +351,14 @@ class UpdateHandler(object):
             CURRENT_AGENT,
             signum,
             self.child_agent.name if self.child_agent is not None else CURRENT_AGENT)
+
         self.child_process.send_signal(signum)
 
         if self.signal_handler not in (None, signal.SIG_IGN, signal.SIG_DFL):
             self.signal_handler(signum, frame)
         elif self.signal_handler is signal.SIG_DFL:
             if signum == signal.SIGTERM:
-                # TODO: This should set self.running to False vs. just exiting
+                self._shutdown()
                 sys.exit(0)
         return
 
@@ -360,7 +383,7 @@ class UpdateHandler(object):
         try:
             if not self._is_clean_start:
                 msg = u"Agent did not terminate cleanly: {0}".format(
-                            fileutil.read_file(self._sentinal_file_path()))
+                            fileutil.read_file(self._sentinel_file_path()))
                 logger.info(msg)
                 add_event(
                     AGENT_NAME,
@@ -371,7 +394,6 @@ class UpdateHandler(object):
         except Exception:
             pass
 
-        self._set_sentinal(msg="Starting")
         return
 
     def _ensure_no_orphans(self, orphan_wait_interval=ORPHAN_WAIT_INTERVAL):
@@ -489,7 +511,7 @@ class UpdateHandler(object):
 
     @property
     def _is_clean_start(self):
-        return not os.path.isfile(self._sentinal_file_path())
+        return not os.path.isfile(self._sentinel_file_path())
 
     @property
     def _is_orphaned(self):
@@ -534,7 +556,7 @@ class UpdateHandler(object):
 
         known_versions = [agent.version for agent in self.agents]
         if CURRENT_VERSION not in known_versions:
-            logger.info(
+            logger.verbose(
                 u"Running Agent {0} was not found in the agent manifest - adding to list",
                 CURRENT_VERSION)
             known_versions.append(CURRENT_VERSION)
@@ -559,33 +581,33 @@ class UpdateHandler(object):
         self.agents.sort(key=lambda agent: agent.version, reverse=True)
         return
 
-    def _set_sentinal(self, agent=CURRENT_AGENT, msg="Unknown cause"):
+    def _set_sentinel(self, agent=CURRENT_AGENT, msg="Unknown cause"):
         try:
             fileutil.write_file(
-                self._sentinal_file_path(),
+                self._sentinel_file_path(),
                 "[{0}] [{1}]".format(agent, msg))
         except Exception as e:
             logger.warn(
-                u"Exception writing sentinal file {0}: {1}",
-                self._sentinal_file_path(),
+                u"Exception writing sentinel file {0}: {1}",
+                self._sentinel_file_path(),
                 str(e))
         return
 
-    def _sentinal_file_path(self):
-        return os.path.join(conf.get_lib_dir(), AGENT_SENTINAL_FILE)
+    def _sentinel_file_path(self):
+        return os.path.join(conf.get_lib_dir(), AGENT_SENTINEL_FILE)
 
     def _shutdown(self):
         self.running = False
 
-        if not os.path.isfile(self._sentinal_file_path()):
+        if not os.path.isfile(self._sentinel_file_path()):
             return
 
         try:
-            os.remove(self._sentinal_file_path())
+            os.remove(self._sentinel_file_path())
         except Exception as e:
             logger.warn(
-                u"Exception removing sentinal file {0}: {1}",
-                self._sentinal_file_path(),
+                u"Exception removing sentinel file {0}: {1}",
+                self._sentinel_file_path(),
                 str(e))
         return
 
@@ -660,7 +682,7 @@ class UpdateHandler(object):
                     continue
 
                 msg = u"Exception retrieving agent manifests: {0}".format(
-                            ustr(e))
+                            ustr(traceback.format_exc()))
                 logger.warn(msg)
                 add_event(
                     AGENT_NAME,
@@ -725,6 +747,13 @@ class GuestAgent(object):
             self._ensure_loaded()
         except Exception as e:
             if isinstance(e, ResourceGoneError):
+                raise
+
+            # The agent was improperly blacklisting versions due to a timeout
+            # encountered while downloading a later version. Errors of type
+            # socket.error are IOError, so this should provide sufficient
+            # protection against a large class of I/O operation failures.
+            if isinstance(e, IOError):
                 raise
 
             # Note the failure, blacklist the agent if the package downloaded
@@ -817,7 +846,9 @@ class GuestAgent(object):
         self._load_error()
 
     def _download(self):
-        for uri in self.pkg.uris:
+        uris_shuffled = self.pkg.uris
+        random.shuffle(uris_shuffled)
+        for uri in uris_shuffled:
             if not HostPluginProtocol.is_default_channel() and self._fetch(uri.uri):
                 break
 
@@ -859,6 +890,8 @@ class GuestAgent(object):
     def _fetch(self, uri, headers=None, use_proxy=True):
         package = None
         try:
+            is_healthy = True
+            error_response = ''
             resp = restutil.http_get(uri, use_proxy=use_proxy, headers=headers)
             if restutil.request_succeeded(resp):
                 package = resp.read()
@@ -867,8 +900,13 @@ class GuestAgent(object):
                                     asbin=True)
                 logger.verbose(u"Agent {0} downloaded from {1}", self.name, uri)
             else:
-                logger.verbose("Fetch was unsuccessful [{0}]",
-                               restutil.read_response_error(resp))
+                error_response = restutil.read_response_error(resp)
+                logger.verbose("Fetch was unsuccessful [{0}]", error_response)
+                is_healthy = not restutil.request_failed_at_hostplugin(resp)
+
+            if self.host is not None:
+                self.host.report_fetch_health(uri, is_healthy, source='GuestAgent', response=error_response)
+
         except restutil.HttpError as http_error:
             if isinstance(http_error, ResourceGoneError):
                 raise

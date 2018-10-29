@@ -12,23 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
 from __future__ import print_function
 
-from datetime import datetime
-
-import azurelinuxagent.common.event as event
-import azurelinuxagent.common.logger as logger
+from datetime import datetime, timedelta
 
 from azurelinuxagent.common.event import add_event, \
-                                    mark_event_status, should_emit_event, \
-                                    WALAEventOperation
+    WALAEventOperation, elapsed_milliseconds
 from azurelinuxagent.common.future import ustr
 from azurelinuxagent.common.version import CURRENT_VERSION
 
 from tests.tools import *
+
+import azurelinuxagent.common.event as event
 
 
 class TestEvent(AgentTestCase):
@@ -49,8 +47,7 @@ class TestEvent(AgentTestCase):
         self.assertTrue(es.event_succeeded("Foo", "1.2", "FauxOperation"))
 
     def test_event_status_records_status(self):
-        d = tempfile.mkdtemp()
-        es = event.EventStatus(tempfile.mkdtemp())
+        es = event.EventStatus()
 
         es.mark_event_status("Foo", "1.2", "FauxOperation", True)
         self.assertTrue(es.event_succeeded("Foo", "1.2", "FauxOperation"))
@@ -70,7 +67,7 @@ class TestEvent(AgentTestCase):
         self.assertFalse(es.event_succeeded("Foo", "1.2", "FauxOperation"))
 
     def test_should_emit_event_ignores_unknown_operations(self):
-        event.__event_status__ = event.EventStatus(tempfile.mkdtemp())
+        event.__event_status__ = event.EventStatus()
 
         self.assertTrue(event.should_emit_event("Foo", "1.2", "FauxOperation", True))
         self.assertTrue(event.should_emit_event("Foo", "1.2", "FauxOperation", False))
@@ -83,7 +80,7 @@ class TestEvent(AgentTestCase):
 
 
     def test_should_emit_event_handles_known_operations(self):
-        event.__event_status__ = event.EventStatus(tempfile.mkdtemp())
+        event.__event_status__ = event.EventStatus()
 
         # Known operations always initially "fire"
         for op in event.__event_status_operations__:
@@ -113,7 +110,7 @@ class TestEvent(AgentTestCase):
         event.__event_logger__.reset_periodic()
 
         event.add_periodic(logger.EVERY_DAY, "FauxEvent")
-        mock_event.assert_called_once()
+        self.assertEqual(1, mock_event.call_count)
 
     @patch('azurelinuxagent.common.event.EventLogger.add_event')
     def test_periodic_does_not_emit_if_previously_sent(self, mock_event):
@@ -218,3 +215,24 @@ class TestEvent(AgentTestCase):
         with open(last_event) as last_fh:
             last_event_text = last_fh.read()
             self.assertTrue('last event' in last_event_text)
+
+    def test_elapsed_milliseconds(self):
+        utc_start = datetime.utcnow() + timedelta(days=1)
+        self.assertEqual(0, elapsed_milliseconds(utc_start))
+
+    @patch('azurelinuxagent.common.event.EventLogger.save_event')
+    def test_report_metric(self, mock_event):
+        event.report_metric("cpu", "%idle", "_total", 10.0)
+        self.assertEqual(1, mock_event.call_count)
+        event_json = mock_event.call_args[0][0]
+        self.assertIn("69B669B9-4AF8-4C50-BDC4-6006FA76E975", event_json)
+        self.assertIn("%idle", event_json)
+        import json
+        event_dictionary = json.loads(event_json)
+        self.assertEqual(event_dictionary['providerId'], "69B669B9-4AF8-4C50-BDC4-6006FA76E975")
+        for parameter in event_dictionary["parameters"]:
+            if parameter['name'] == 'Counter':
+                self.assertEqual(parameter['value'], '%idle')
+                break
+        else:
+            self.fail("Counter '%idle' not found in event parameters: {0}".format(repr(event_dictionary)))

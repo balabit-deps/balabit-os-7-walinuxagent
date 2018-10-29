@@ -1,27 +1,7 @@
-# Copyright 2014 Microsoft Corporation
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# Requires Python 2.4+ and Openssl 1.0+
-#
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the Apache License.
 
 from __future__ import print_function
-
-from datetime import datetime
-
-import json
-import shutil
-import stat
 
 from azurelinuxagent.common.event import *
 from azurelinuxagent.common.protocol.hostplugin import *
@@ -152,7 +132,7 @@ class UpdateTestCase(AgentTestCase):
         if len(agents) <= 0:
             agents = get_agent_pkgs()
         for agent in agents:
-            fileutil.copy_file(agent, to_dir=self.tmp_dir)
+            shutil.copy(agent, self.tmp_dir)
         return
 
     def expand_agents(self):
@@ -181,7 +161,7 @@ class UpdateTestCase(AgentTestCase):
         return
 
     def prepare_agents(self,
-                       count=5,
+                       count=20,
                        is_available=True):
 
         # Ensure the test data is copied over
@@ -389,6 +369,30 @@ class TestGuestAgent(UpdateTestCase):
 
     @patch("azurelinuxagent.ga.update.GuestAgent._ensure_downloaded")
     @patch("azurelinuxagent.ga.update.GuestAgent._ensure_loaded")
+    def test_resource_gone_error_not_blacklisted(self, mock_loaded, mock_downloaded):
+        try:
+            mock_downloaded.side_effect = ResourceGoneError()
+            agent = GuestAgent(path=self.agent_path)
+            self.assertFalse(agent.is_blacklisted)
+        except ResourceGoneError:
+            pass
+        except:
+            self.fail("Exception was not expected!")
+
+    @patch("azurelinuxagent.ga.update.GuestAgent._ensure_downloaded")
+    @patch("azurelinuxagent.ga.update.GuestAgent._ensure_loaded")
+    def test_ioerror_not_blacklisted(self, mock_loaded, mock_downloaded):
+        try:
+            mock_downloaded.side_effect = IOError()
+            agent = GuestAgent(path=self.agent_path)
+            self.assertFalse(agent.is_blacklisted)
+        except IOError:
+            pass
+        except:
+            self.fail("Exception was not expected!")
+
+    @patch("azurelinuxagent.ga.update.GuestAgent._ensure_downloaded")
+    @patch("azurelinuxagent.ga.update.GuestAgent._ensure_loaded")
     def test_is_downloaded(self, mock_loaded, mock_downloaded):
         agent = GuestAgent(path=self.agent_path)
         self.assertFalse(agent.is_downloaded)
@@ -510,7 +514,8 @@ class TestGuestAgent(UpdateTestCase):
     @patch("azurelinuxagent.ga.update.GuestAgent._ensure_downloaded")
     @patch("azurelinuxagent.ga.update.GuestAgent._ensure_loaded")
     @patch("azurelinuxagent.ga.update.restutil.http_get")
-    def test_download_fallback(self, mock_http_get, mock_loaded, mock_downloaded):
+    @patch("azurelinuxagent.ga.update.restutil.http_post")
+    def test_download_fallback(self, mock_http_post, mock_http_get, mock_loaded, mock_downloaded):
         self.remove_agents()
         self.assertFalse(os.path.isdir(self.agent_path))
 
@@ -665,22 +670,17 @@ class TestUpdate(UpdateTestCase):
 
         self.assertEqual(None, self.update_handler.signal_handler)
 
-    def test_emit_restart_event_writes_sentinal_file(self):
-        self.assertFalse(os.path.isfile(self.update_handler._sentinal_file_path()))
-        self.update_handler._emit_restart_event()
-        self.assertTrue(os.path.isfile(self.update_handler._sentinal_file_path()))
-
     def test_emit_restart_event_emits_event_if_not_clean_start(self):
         try:
             mock_event = self.event_patch.start()
-            self.update_handler._set_sentinal()
+            self.update_handler._set_sentinel()
             self.update_handler._emit_restart_event()
             self.assertEqual(1, mock_event.call_count)
         except Exception as e:
             pass
         self.event_patch.stop()
 
-    def _create_protocol(self, count=5, versions=None):
+    def _create_protocol(self, count=20, versions=None):
         latest_version = self.prepare_agents(count=count)
         if versions is None or len(versions) <= 0:
             versions = [latest_version]
@@ -842,8 +842,8 @@ class TestUpdate(UpdateTestCase):
         self.update_handler._set_agents([GuestAgent(path=path) for path in self.agent_dirs()])
         self.assertEqual(len(self.agent_dirs()), len(self.update_handler.agents))
 
-        kept_agents = self.update_handler.agents[1::2]
-        blacklisted_agents = self.update_handler.agents[::2]
+        kept_agents = self.update_handler.agents[::2]
+        blacklisted_agents = self.update_handler.agents[1::2]
         for agent in blacklisted_agents:
             agent.mark_failure(is_fatal=True)
         self.update_handler._filter_blacklisted_agents()
@@ -879,7 +879,8 @@ class TestUpdate(UpdateTestCase):
         protocol = WireProtocol('12.34.56.78')
         mock_get_host.return_value = "faux host"
         host = self.update_handler._get_host_plugin(protocol=protocol)
-        mock_get_host.assert_called_once()
+        print("mock_get_host call cound={0}".format(mock_get_host.call_count))
+        self.assertEqual(1, mock_get_host.call_count)
         self.assertEqual("faux host", host)
 
     @patch('azurelinuxagent.common.protocol.wire.WireClient.get_host_plugin')
@@ -936,16 +937,16 @@ class TestUpdate(UpdateTestCase):
         for p in pid_files:
             self.assertTrue(pid_re.match(os.path.basename(p)))
 
-    def test_is_clean_start_returns_true_when_no_sentinal(self):
-        self.assertFalse(os.path.isfile(self.update_handler._sentinal_file_path()))
+    def test_is_clean_start_returns_true_when_no_sentinel(self):
+        self.assertFalse(os.path.isfile(self.update_handler._sentinel_file_path()))
         self.assertTrue(self.update_handler._is_clean_start)
 
-    def test_is_clean_start_returns_false_when_sentinal_exists(self):
-        self.update_handler._set_sentinal(agent=CURRENT_AGENT)
+    def test_is_clean_start_returns_false_when_sentinel_exists(self):
+        self.update_handler._set_sentinel(agent=CURRENT_AGENT)
         self.assertFalse(self.update_handler._is_clean_start)
 
     def test_is_clean_start_returns_false_for_exceptions(self):
-        self.update_handler._set_sentinal()
+        self.update_handler._set_sentinel()
         with patch("azurelinuxagent.common.utils.fileutil.read_file", side_effect=Exception):
             self.assertFalse(self.update_handler._is_clean_start)
 
@@ -998,12 +999,23 @@ class TestUpdate(UpdateTestCase):
         # Ensure at least three agents initially exist
         self.assertTrue(2 < len(self.update_handler.agents))
 
-        # Purge every other agent
-        kept_agents = self.update_handler.agents[1::2]
-        purged_agents = self.update_handler.agents[::2]
+        # Purge every other agent. Don't add the current version to agents_to_keep explicitly;
+        # the current version is never purged
+        agents_to_keep = []
+        kept_agents = []
+        purged_agents = []
+        for i in range(0, len(self.update_handler.agents)):
+            if self.update_handler.agents[i].version == CURRENT_VERSION:
+                kept_agents.append(self.update_handler.agents[i])
+            else:
+                if i % 2 == 0:
+                    agents_to_keep.append(self.update_handler.agents[i])
+                    kept_agents.append(self.update_handler.agents[i])
+                else:
+                    purged_agents.append(self.update_handler.agents[i])
 
         # Reload and assert only the kept agents remain on disk
-        self.update_handler.agents = kept_agents
+        self.update_handler.agents = agents_to_keep
         self.update_handler._purge_agents()
         self.update_handler._find_agents()
         self.assertEqual(
@@ -1193,7 +1205,7 @@ class TestUpdate(UpdateTestCase):
         self._test_run_latest()
         self.assertEqual(0, mock_signal.call_count)
 
-    def _test_run(self, invocations=1, calls=[call.run()], enable_updates=False):
+    def _test_run(self, invocations=1, calls=[call.run()], enable_updates=False, sleep_interval=(3,)):
         conf.get_autoupdate_enabled = Mock(return_value=enable_updates)
 
         # Note:
@@ -1212,23 +1224,27 @@ class TestUpdate(UpdateTestCase):
         fileutil.write_file(conf.get_agent_pid_file_path(), ustr(42))
 
         with patch('azurelinuxagent.ga.exthandlers.get_exthandlers_handler') as mock_handler:
-            with patch('azurelinuxagent.ga.monitor.get_monitor_handler') as mock_monitor:
-                with patch('azurelinuxagent.ga.env.get_env_handler') as mock_env:
-                    with patch('time.sleep', side_effect=iterator) as mock_sleep:
-                        with patch('sys.exit') as mock_exit:
-                            if isinstance(os.getppid, MagicMock):
-                                self.update_handler.run()
-                            else:
-                                with patch('os.getppid', return_value=42):
+            with patch('azurelinuxagent.ga.remoteaccess.get_remote_access_handler') as mock_ra_handler:
+                with patch('azurelinuxagent.ga.monitor.get_monitor_handler') as mock_monitor:
+                    with patch('azurelinuxagent.ga.env.get_env_handler') as mock_env:
+                        with patch('time.sleep', side_effect=iterator) as mock_sleep:
+                            with patch('sys.exit') as mock_exit:
+                                if isinstance(os.getppid, MagicMock):
                                     self.update_handler.run()
+                                else:
+                                    with patch('os.getppid', return_value=42):
+                                        self.update_handler.run()
 
-                            self.assertEqual(1, mock_handler.call_count)
-                            self.assertEqual(mock_handler.return_value.method_calls, calls)
-                            self.assertEqual(invocations, mock_sleep.call_count)
-                            self.assertEqual(1, mock_monitor.call_count)
-                            self.assertEqual(1, mock_env.call_count)
-                            self.assertEqual(1, mock_exit.call_count)
-
+                                self.assertEqual(1, mock_handler.call_count)
+                                self.assertEqual(mock_handler.return_value.method_calls, calls)
+                                self.assertEqual(1, mock_ra_handler.call_count)
+                                self.assertEqual(mock_ra_handler.return_value.method_calls, calls)
+                                self.assertEqual(invocations, mock_sleep.call_count)
+                                if invocations > 0:
+                                    self.assertEqual(sleep_interval, mock_sleep.call_args[0])
+                                self.assertEqual(1, mock_monitor.call_count)
+                                self.assertEqual(1, mock_env.call_count)
+                                self.assertEqual(1, mock_exit.call_count)
 
     def test_run(self):
         self._test_run()
@@ -1244,14 +1260,14 @@ class TestUpdate(UpdateTestCase):
         with patch('os.getppid', return_value=1):
             self._test_run(invocations=0, calls=[], enable_updates=True)
 
-    def test_run_clears_sentinal_on_successful_exit(self):
+    def test_run_clears_sentinel_on_successful_exit(self):
         self._test_run()
-        self.assertFalse(os.path.isfile(self.update_handler._sentinal_file_path()))
+        self.assertFalse(os.path.isfile(self.update_handler._sentinel_file_path()))
 
-    def test_run_leaves_sentinal_on_unsuccessful_exit(self):
+    def test_run_leaves_sentinel_on_unsuccessful_exit(self):
         self.update_handler._upgrade_available = Mock(side_effect=Exception)
         self._test_run(invocations=0, calls=[], enable_updates=True)
-        self.assertTrue(os.path.isfile(self.update_handler._sentinal_file_path()))
+        self.assertTrue(os.path.isfile(self.update_handler._sentinel_file_path()))
 
     def test_run_emits_restart_event(self):
         self.update_handler._emit_restart_event = Mock()
@@ -1275,31 +1291,31 @@ class TestUpdate(UpdateTestCase):
             self.assertTrue(v > a.version)
             v = a.version
 
-    def test_set_sentinal(self):
-        self.assertFalse(os.path.isfile(self.update_handler._sentinal_file_path()))
-        self.update_handler._set_sentinal()
-        self.assertTrue(os.path.isfile(self.update_handler._sentinal_file_path()))
+    def test_set_sentinel(self):
+        self.assertFalse(os.path.isfile(self.update_handler._sentinel_file_path()))
+        self.update_handler._set_sentinel()
+        self.assertTrue(os.path.isfile(self.update_handler._sentinel_file_path()))
 
-    def test_set_sentinal_writes_current_agent(self):
-        self.update_handler._set_sentinal()
+    def test_set_sentinel_writes_current_agent(self):
+        self.update_handler._set_sentinel()
         self.assertTrue(
-            fileutil.read_file(self.update_handler._sentinal_file_path()),
+            fileutil.read_file(self.update_handler._sentinel_file_path()),
             CURRENT_AGENT)
 
     def test_shutdown(self):
-        self.update_handler._set_sentinal()
+        self.update_handler._set_sentinel()
         self.update_handler._shutdown()
         self.assertFalse(self.update_handler.running)
-        self.assertFalse(os.path.isfile(self.update_handler._sentinal_file_path()))
+        self.assertFalse(os.path.isfile(self.update_handler._sentinel_file_path()))
 
-    def test_shutdown_ignores_missing_sentinal_file(self):
-        self.assertFalse(os.path.isfile(self.update_handler._sentinal_file_path()))
+    def test_shutdown_ignores_missing_sentinel_file(self):
+        self.assertFalse(os.path.isfile(self.update_handler._sentinel_file_path()))
         self.update_handler._shutdown()
         self.assertFalse(self.update_handler.running)
-        self.assertFalse(os.path.isfile(self.update_handler._sentinal_file_path()))
+        self.assertFalse(os.path.isfile(self.update_handler._sentinel_file_path()))
 
     def test_shutdown_ignores_exceptions(self):
-        self.update_handler._set_sentinal()
+        self.update_handler._set_sentinel()
 
         try:
             with patch("os.remove", side_effect=Exception):
@@ -1312,7 +1328,7 @@ class TestUpdate(UpdateTestCase):
             base_version=FlexibleVersion(AGENT_VERSION),
             protocol=None,
             versions=None,
-            count=5):
+            count=20):
 
         if protocol is None:
             protocol = self._create_protocol(count=count, versions=versions)
@@ -1360,7 +1376,7 @@ class TestUpdate(UpdateTestCase):
     def test_upgrade_available_purges_old_agents(self):
         self.prepare_agents()
         agent_count = self.agent_count()
-        self.assertEqual(5, agent_count)
+        self.assertEqual(20, agent_count)
 
         agent_versions = self.agent_versions()[:3]
         self.assertTrue(self._test_upgrade_available(versions=agent_versions))
@@ -1477,6 +1493,170 @@ class TestUpdate(UpdateTestCase):
         self.assertTrue(ga_manifest_2.allowed_versions[0] == '2.2.13')
         self.assertTrue(ga_manifest_2.allowed_versions[1] == '2.2.14')
 
+    @patch('azurelinuxagent.common.conf.get_extensions_enabled', return_value=False)
+    def test_update_happens_when_extensions_disabled(self, _):
+        """
+        Although the extension enabled config will not get checked
+        before an update is found, this test attempts to ensure that
+        behavior never changes.
+        """
+        self.update_handler._upgrade_available = Mock(return_value=True)
+        self._test_run(invocations=0, calls=[], enable_updates=True, sleep_interval=(300,))
+
+    @patch('azurelinuxagent.common.conf.get_extensions_enabled', return_value=False)
+    def test_interval_changes_when_extensions_disabled(self, _):
+        """
+        When extension processing is disabled, the goal state interval should be larger.
+        """
+        self.update_handler._upgrade_available = Mock(return_value=False)
+        self._test_run(invocations=15, calls=[call.run()] * 15, sleep_interval=(300,))
+
+
+class MonitorThreadTest(AgentTestCase):
+    def setUp(self):
+        AgentTestCase.setUp(self)
+        self.event_patch = patch('azurelinuxagent.common.event.add_event')
+        self.update_handler = get_update_handler()
+        self.update_handler.protocol_util = Mock()
+
+    def _test_run(self, invocations=1):
+        iterations = [0]
+        def iterator(*args, **kwargs):
+            iterations[0] += 1
+            if iterations[0] >= invocations:
+                self.update_handler.running = False
+            return
+
+        with patch('os.getpid', return_value=42):
+            with patch.object(UpdateHandler, '_is_orphaned') as mock_is_orphaned:
+                mock_is_orphaned.__get__ = Mock(return_value=False)
+                with patch('azurelinuxagent.ga.exthandlers.get_exthandlers_handler') as mock_handler:
+                    with patch('azurelinuxagent.ga.remoteaccess.get_remote_access_handler') as mock_ra_handler:
+                        with patch('time.sleep', side_effect=iterator) as mock_sleep:
+                            with patch('sys.exit') as mock_exit:
+                                self.update_handler.run()
+
+    @patch('azurelinuxagent.ga.monitor.get_monitor_handler')
+    @patch('azurelinuxagent.ga.env.get_env_handler')
+    def test_start_threads(self, mock_env, mock_monitor):
+        self.assertTrue(self.update_handler.running)
+
+        mock_monitor_thread = MagicMock()
+        mock_monitor_thread.run = MagicMock()
+        mock_monitor.return_value = mock_monitor_thread
+
+        mock_env_thread = MagicMock()
+        mock_env_thread.run = MagicMock()
+        mock_env.return_value = mock_env_thread
+
+        self._test_run(invocations=0)
+        self.assertEqual(1, mock_monitor.call_count)
+        self.assertEqual(1, mock_monitor_thread.run.call_count)
+        self.assertEqual(1, mock_env.call_count)
+        self.assertEqual(1, mock_env_thread.run.call_count)
+
+    @patch('azurelinuxagent.ga.monitor.get_monitor_handler')
+    @patch('azurelinuxagent.ga.env.get_env_handler')
+    def test_check_if_monitor_thread_is_alive(self, mock_env, mock_monitor):
+        self.assertTrue(self.update_handler.running)
+
+        mock_monitor_thread = MagicMock()
+        mock_monitor_thread.run = MagicMock()
+        mock_monitor_thread.is_alive = MagicMock(return_value=True)
+        mock_monitor_thread.start = MagicMock()
+        mock_monitor.return_value = mock_monitor_thread
+
+        self._test_run(invocations=0)
+        self.assertEqual(1, mock_monitor.call_count)
+        self.assertEqual(1, mock_monitor_thread.run.call_count)
+        self.assertEqual(1, mock_monitor_thread.is_alive.call_count)
+        self.assertEqual(0, mock_monitor_thread.start.call_count)
+
+    @patch('azurelinuxagent.ga.monitor.get_monitor_handler')
+    @patch('azurelinuxagent.ga.env.get_env_handler')
+    def test_check_if_env_thread_is_alive(self, mock_env, mock_monitor):
+        self.assertTrue(self.update_handler.running)
+
+        mock_env_thread = MagicMock()
+        mock_env_thread.run = MagicMock()
+        mock_env_thread.is_alive = MagicMock(return_value=True)
+        mock_env_thread.start = MagicMock()
+        mock_env.return_value = mock_env_thread
+
+        self._test_run(invocations=1)
+        self.assertEqual(1, mock_env.call_count)
+        self.assertEqual(1, mock_env_thread.run.call_count)
+        self.assertEqual(1, mock_env_thread.is_alive.call_count)
+        self.assertEqual(0, mock_env_thread.start.call_count)
+
+    @patch('azurelinuxagent.ga.monitor.get_monitor_handler')
+    @patch('azurelinuxagent.ga.env.get_env_handler')
+    def test_restart_monitor_thread_if_not_alive(self, mock_env, mock_monitor):
+        self.assertTrue(self.update_handler.running)
+
+        mock_monitor_thread = MagicMock()
+        mock_monitor_thread.run = MagicMock()
+        mock_monitor_thread.is_alive = MagicMock(return_value=False)
+        mock_monitor_thread.start = MagicMock()
+        mock_monitor.return_value = mock_monitor_thread
+
+        self._test_run(invocations=1)
+        self.assertEqual(1, mock_monitor.call_count)
+        self.assertEqual(1, mock_monitor_thread.run.call_count)
+        self.assertEqual(1, mock_monitor_thread.is_alive.call_count)
+        self.assertEqual(1, mock_monitor_thread.start.call_count)
+
+    @patch('azurelinuxagent.ga.monitor.get_monitor_handler')
+    @patch('azurelinuxagent.ga.env.get_env_handler')
+    def test_restart_env_thread_if_not_alive(self, mock_env, mock_monitor):
+        self.assertTrue(self.update_handler.running)
+
+        mock_env_thread = MagicMock()
+        mock_env_thread.run = MagicMock()
+        mock_env_thread.is_alive = MagicMock(return_value=False)
+        mock_env_thread.start = MagicMock()
+        mock_env.return_value = mock_env_thread
+
+        self._test_run(invocations=1)
+        self.assertEqual(1, mock_env.call_count)
+        self.assertEqual(1, mock_env_thread.run.call_count)
+        self.assertEqual(1, mock_env_thread.is_alive.call_count)
+        self.assertEqual(1, mock_env_thread.start.call_count)
+
+    @patch('azurelinuxagent.ga.monitor.get_monitor_handler')
+    @patch('azurelinuxagent.ga.env.get_env_handler')
+    def test_restart_monitor_thread(self, mock_env, mock_monitor):
+        self.assertTrue(self.update_handler.running)
+
+        mock_monitor_thread = MagicMock()
+        mock_monitor_thread.run = MagicMock()
+        mock_monitor_thread.is_alive = MagicMock(return_value=False)
+        mock_monitor_thread.start = MagicMock()
+        mock_monitor.return_value = mock_monitor_thread
+
+        self._test_run(invocations=0)
+        self.assertEqual(True, mock_monitor.called)
+        self.assertEqual(True, mock_monitor_thread.run.called)
+        self.assertEqual(True, mock_monitor_thread.is_alive.called)
+        self.assertEqual(True, mock_monitor_thread.start.called)
+
+    @patch('azurelinuxagent.ga.monitor.get_monitor_handler')
+    @patch('azurelinuxagent.ga.env.get_env_handler')
+    def test_restart_env_thread(self, mock_env, mock_monitor):
+        self.assertTrue(self.update_handler.running)
+
+        mock_env_thread = MagicMock()
+        mock_env_thread.run = MagicMock()
+        mock_env_thread.is_alive = MagicMock(return_value=False)
+        mock_env_thread.start = MagicMock()
+        mock_env.return_value = mock_env_thread
+
+        self._test_run(invocations=0)
+        self.assertEqual(True, mock_env.called)
+        self.assertEqual(True, mock_env_thread.run.called)
+        self.assertEqual(True, mock_env_thread.is_alive.called)
+        self.assertEqual(True, mock_env_thread.start.called)
+
 
 class ChildMock(Mock):
     def __init__(self, return_value=0, side_effect=None):
@@ -1550,6 +1730,7 @@ class ProtocolMock(object):
         self.call_counts["update_goal_state"] += 1
         self.goal_state_forced = self.goal_state_forced or forced
 
+
 class ResponseMock(Mock):
     def __init__(self, status=restutil.httpclient.OK, response=None, reason=None):
         Mock.__init__(self)
@@ -1578,6 +1759,7 @@ class TimeMock(Mock):
         current_time = self.next_time
         self.next_time += self.time_increment
         return current_time
+
 
 if __name__ == '__main__':
     unittest.main()

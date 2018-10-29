@@ -1,6 +1,6 @@
 # Microsoft Azure Linux Agent
 #
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,13 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 import socket
 import azurelinuxagent.common.logger as logger
 import azurelinuxagent.common.utils.restutil as restutil
 from azurelinuxagent.common.exception import ProtocolError, HttpError
 from azurelinuxagent.common.future import ustr
+from azurelinuxagent.common.utils import fileutil
 from azurelinuxagent.common.version import DISTRO_VERSION, DISTRO_NAME, CURRENT_VERSION
 
 
@@ -161,8 +162,7 @@ class Extension(DataContract):
 class ExtHandlerProperties(DataContract):
     def __init__(self):
         self.version = None
-        self.upgradePolicy = None
-        self.upgradeGuid = None
+        self.dependencyLevel = None
         self.state = None
         self.extensions = DataContractList(Extension)
 
@@ -177,6 +177,16 @@ class ExtHandler(DataContract):
         self.name = name
         self.properties = ExtHandlerProperties()
         self.versionUris = DataContractList(ExtHandlerVersionUri)
+
+    def sort_key(self):
+        level = self.properties.dependencyLevel
+        if level is None:
+            level = 0
+        # Process uninstall or disabled before enabled, in reverse order
+        # remap 0 to -1, 1 to -2, 2 to -3, etc
+        if self.properties.state != u"enabled":
+            level = (0 - level) - 1
+        return level
 
 
 class ExtHandlerList(DataContract):
@@ -246,13 +256,11 @@ class ExtHandlerStatus(DataContract):
     def __init__(self,
                  name=None,
                  version=None,
-                 upgradeGuid=None,
                  status=None,
                  code=0,
                  message=None):
         self.name = name
         self.version = version
-        self.upgradeGuid = upgradeGuid
         self.status = status
         self.code = code
         self.message = message
@@ -293,6 +301,18 @@ class TelemetryEventList(DataContract):
         self.events = DataContractList(TelemetryEvent)
 
 
+class RemoteAccessUser(DataContract):
+    def __init__(self, name, encrypted_password, expiration):
+        self.name = name
+        self.encrypted_password = encrypted_password
+        self.expiration = expiration
+
+
+class RemoteAccessUsersList(DataContract):
+    def __init__(self):
+        self.users = DataContractList(RemoteAccessUser)
+
+
 class Protocol(DataContract):
     def detect(self):
         raise NotImplementedError()
@@ -321,13 +341,8 @@ class Protocol(DataContract):
     def get_artifacts_profile(self):
         raise NotImplementedError()
 
-    def download_ext_handler_pkg(self, uri, headers=None):
-        try:
-            resp = restutil.http_get(uri, use_proxy=True, headers=headers)
-            if restutil.request_succeeded(resp):
-                return resp.read()
-        except Exception as e:
-            logger.warn("Failed to download from: {0}".format(uri), e)
+    def download_ext_handler_pkg(self, uri, destination, headers=None, use_proxy=True):
+        raise NotImplementedError()
 
     def report_provision_status(self, provision_status):
         raise NotImplementedError()

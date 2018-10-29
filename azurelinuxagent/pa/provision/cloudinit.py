@@ -1,6 +1,6 @@
 # Microsoft Azure Linux Agent
 #
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
 import os
@@ -28,7 +28,7 @@ import azurelinuxagent.common.logger as logger
 import azurelinuxagent.common.utils.fileutil as fileutil
 import azurelinuxagent.common.utils.shellutil as shellutil
 
-from azurelinuxagent.common.event import elapsed_milliseconds
+from azurelinuxagent.common.event import elapsed_milliseconds, WALAEventOperation
 from azurelinuxagent.common.exception import ProvisionError, ProtocolError
 from azurelinuxagent.common.future import ustr
 from azurelinuxagent.common.protocol import OVF_FILE_NAME
@@ -64,17 +64,18 @@ class CloudInitProvisionHandler(ProvisionHandler):
             logger.info("Finished provisioning")
 
             self.report_ready(thumbprint)
-            self.report_event("Provision succeed",
+            self.report_event("Provisioning with cloud-init succeeded ({0}s)".format(self._get_uptime_seconds()),
                 is_success=True,
                 duration=elapsed_milliseconds(utc_start))
 
         except ProvisionError as e:
-            logger.error("Provisioning failed: {0}", ustr(e))
+            msg = "Provisioning with cloud-init failed: {0} ({1}s)".format(ustr(e), self._get_uptime_seconds())
+            logger.error(msg)
             self.report_not_ready("ProvisioningFailed", ustr(e))
-            self.report_event(ustr(e))
+            self.report_event(msg)
             return
 
-    def wait_for_ovfenv(self, max_retry=360, sleep_time=5):
+    def wait_for_ovfenv(self, max_retry=1800, sleep_time=1):
         """
         Wait for cloud-init to copy ovf-env.xml file from provision ISO
         """
@@ -82,7 +83,8 @@ class CloudInitProvisionHandler(ProvisionHandler):
         for retry in range(0, max_retry):
             if os.path.isfile(ovf_file_path):
                 try:
-                    OvfEnv(fileutil.read_file(ovf_file_path))
+                    ovf_env = OvfEnv(fileutil.read_file(ovf_file_path))
+                    self.handle_provision_guest_agent(ovf_env.provision_guest_agent)
                     return
                 except ProtocolError as pe:
                     raise ProvisionError("OVF xml could not be parsed "

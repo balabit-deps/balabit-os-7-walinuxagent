@@ -1,6 +1,6 @@
 # Microsoft Azure Linux Agent
 #
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
 """
@@ -25,6 +25,8 @@ import os.path
 
 import azurelinuxagent.common.utils.fileutil as fileutil
 from azurelinuxagent.common.exception import AgentConfigError
+
+DISABLE_AGENT_FILE = 'disable_agent'
 
 
 class ConfigurationProvider(object):
@@ -40,11 +42,11 @@ class ConfigurationProvider(object):
             raise AgentConfigError("Can't not parse empty configuration")
         for line in content.split('\n'):
             if not line.startswith("#") and "=" in line:
-                parts = line.split('=')
+                parts = line.split('=', 1)
                 if len(parts) < 2:
                     continue
                 key = parts[0].strip()
-                value = parts[1].split('#')[0].strip("\" ")
+                value = parts[1].split('#')[0].strip("\" ").strip()
                 self.values[key] = value if value != "None" else None
 
     def get(self, key, default_val):
@@ -85,58 +87,63 @@ def load_conf_from_file(conf_file_path, conf=__conf__):
         raise AgentConfigError(("Failed to load conf file:{0}, {1}"
                                 "").format(conf_file_path, err))
 
+
 __SWITCH_OPTIONS__ = {
-    "OS.AllowHTTP" : False,
-    "OS.EnableFirewall" : False,
-    "OS.EnableFIPS" : False,
-    "OS.EnableRDMA" : False,
-    "OS.UpdateRdmaDriver" : False,
-    "OS.CheckRdmaDriver" : False,
-    "Logs.Verbose" : False,
-    "Provisioning.Enabled" : True,
-    "Provisioning.UseCloudInit" : False,
-    "Provisioning.AllowResetSysUser" : False,
-    "Provisioning.RegenerateSshHostKeyPair" : False,
-    "Provisioning.DeleteRootPassword" : False,
-    "Provisioning.DecodeCustomData" : False,
-    "Provisioning.ExecuteCustomData" : False,
-    "Provisioning.MonitorHostName" : False,
-    "DetectScvmmEnv" : False,
-    "ResourceDisk.Format" : False,
-    "DetectScvmmEnv" : False,
-    "ResourceDisk.Format" : False,
-    "ResourceDisk.EnableSwap" : False,
-    "AutoUpdate.Enabled" : True,
-    "EnableOverProvisioning" : False
+    "OS.AllowHTTP": False,
+    "OS.EnableFirewall": False,
+    "OS.EnableFIPS": False,
+    "OS.EnableRDMA": False,
+    "OS.UpdateRdmaDriver": False,
+    "OS.CheckRdmaDriver": False,
+    "Logs.Verbose": False,
+    "Extensions.Enabled": True,
+    "Provisioning.Enabled": True,
+    "Provisioning.UseCloudInit": False,
+    "Provisioning.AllowResetSysUser": False,
+    "Provisioning.RegenerateSshHostKeyPair": False,
+    "Provisioning.DeleteRootPassword": False,
+    "Provisioning.DecodeCustomData": False,
+    "Provisioning.ExecuteCustomData": False,
+    "Provisioning.MonitorHostName": False,
+    "DetectScvmmEnv": False,
+    "ResourceDisk.Format": False,
+    "ResourceDisk.EnableSwap": False,
+    "AutoUpdate.Enabled": True,
+    "EnableOverProvisioning": True,
+    "CGroups.EnforceLimits": False,
 }
+
 
 __STRING_OPTIONS__ = {
-    "Lib.Dir" : "/var/lib/waagent",
-    "DVD.MountPoint" : "/mnt/cdrom/secure",
-    "Pid.File" : "/var/run/waagent.pid",
-    "Extension.LogDir" : "/var/log/azure",
-    "OS.OpensslPath" : "/usr/bin/openssl",
-    "OS.SshDir" : "/etc/ssh",
-    "OS.HomeDir" : "/home",
-    "OS.PasswordPath" : "/etc/shadow",
-    "OS.SudoersDir" : "/etc/sudoers.d",
-    "OS.RootDeviceScsiTimeout" : None,
-    "Provisioning.SshHostKeyPairType" : "rsa",
-    "Provisioning.PasswordCryptId" : "6",
-    "HttpProxy.Host" : None,
-    "ResourceDisk.MountPoint" : "/mnt/resource",
-    "ResourceDisk.MountOptions" : None,
-    "ResourceDisk.Filesystem" : "ext3",
-    "AutoUpdate.GAFamily" : "Prod"
+    "Lib.Dir": "/var/lib/waagent",
+    "DVD.MountPoint": "/mnt/cdrom/secure",
+    "Pid.File": "/var/run/waagent.pid",
+    "Extension.LogDir": "/var/log/azure",
+    "OS.OpensslPath": "/usr/bin/openssl",
+    "OS.SshDir": "/etc/ssh",
+    "OS.HomeDir": "/home",
+    "OS.PasswordPath": "/etc/shadow",
+    "OS.SudoersDir": "/etc/sudoers.d",
+    "OS.RootDeviceScsiTimeout": None,
+    "Provisioning.SshHostKeyPairType": "rsa",
+    "Provisioning.PasswordCryptId": "6",
+    "HttpProxy.Host": None,
+    "ResourceDisk.MountPoint": "/mnt/resource",
+    "ResourceDisk.MountOptions": None,
+    "ResourceDisk.Filesystem": "ext3",
+    "AutoUpdate.GAFamily": "Prod",
+    "CGroups.Excluded": "customscript,runcommand",
 }
 
+
 __INTEGER_OPTIONS__ = {
-    "OS.SshClientAliveInterval" : 180,
-    "Provisioning.PasswordCryptSaltLength" : 10,
-    "HttpProxy.Port" : None,
-    "ResourceDisk.SwapSizeMB" : 0,
-    "Autoupdate.Frequency" : 3600
+    "OS.SshClientAliveInterval": 180,
+    "Provisioning.PasswordCryptSaltLength": 10,
+    "HttpProxy.Port": None,
+    "ResourceDisk.SwapSizeMB": 0,
+    "Autoupdate.Frequency": 3600
 }
+
 
 def get_configuration(conf=__conf__):
     options = {}
@@ -151,16 +158,20 @@ def get_configuration(conf=__conf__):
 
     return options
 
+
 def enable_firewall(conf=__conf__):
     return conf.get_switch("OS.EnableFirewall", False)
+
 
 def enable_rdma(conf=__conf__):
     return conf.get_switch("OS.EnableRDMA", False) or \
            conf.get_switch("OS.UpdateRdmaDriver", False) or \
            conf.get_switch("OS.CheckRdmaDriver", False)
 
+
 def enable_rdma_update(conf=__conf__):
     return conf.get_switch("OS.UpdateRdmaDriver", False)
+
 
 def get_logs_verbose(conf=__conf__):
     return conf.get_switch("Logs.Verbose", False)
@@ -185,43 +196,56 @@ def get_agent_pid_file_path(conf=__conf__):
 def get_ext_log_dir(conf=__conf__):
     return conf.get("Extension.LogDir", "/var/log/azure")
 
+
 def get_fips_enabled(conf=__conf__):
     return conf.get_switch("OS.EnableFIPS", False)
+
 
 def get_openssl_cmd(conf=__conf__):
     return conf.get("OS.OpensslPath", "/usr/bin/openssl")
 
+
 def get_ssh_client_alive_interval(conf=__conf__):
     return conf.get("OS.SshClientAliveInterval", 180)
+
 
 def get_ssh_dir(conf=__conf__):
     return conf.get("OS.SshDir", "/etc/ssh")
 
+
 def get_home_dir(conf=__conf__):
     return conf.get("OS.HomeDir", "/home")
+
 
 def get_passwd_file_path(conf=__conf__):
     return conf.get("OS.PasswordPath", "/etc/shadow")
 
+
 def get_sudoers_dir(conf=__conf__):
     return conf.get("OS.SudoersDir", "/etc/sudoers.d")
+
 
 def get_sshd_conf_file_path(conf=__conf__):
     return os.path.join(get_ssh_dir(conf), "sshd_config")
 
+
 def get_ssh_key_glob(conf=__conf__):
     return os.path.join(get_ssh_dir(conf), 'ssh_host_*key*')
+
 
 def get_ssh_key_private_path(conf=__conf__):
     return os.path.join(get_ssh_dir(conf),
         'ssh_host_{0}_key'.format(get_ssh_host_keypair_type(conf)))
 
+
 def get_ssh_key_public_path(conf=__conf__):
     return os.path.join(get_ssh_dir(conf),
         'ssh_host_{0}_key.pub'.format(get_ssh_host_keypair_type(conf)))
 
+
 def get_root_device_scsi_timeout(conf=__conf__):
     return conf.get("OS.RootDeviceScsiTimeout", None)
+
 
 def get_ssh_host_keypair_type(conf=__conf__):
     keypair_type = conf.get("Provisioning.SshHostKeyPairType", "rsa")
@@ -233,14 +257,22 @@ def get_ssh_host_keypair_type(conf=__conf__):
         return "rsa"
     return keypair_type
 
+
 def get_ssh_host_keypair_mode(conf=__conf__):
     return conf.get("Provisioning.SshHostKeyPairType", "rsa")
+
 
 def get_provision_enabled(conf=__conf__):
     return conf.get_switch("Provisioning.Enabled", True)
 
+
+def get_extensions_enabled(conf=__conf__):
+    return conf.get_switch("Extensions.Enabled", True)
+
+
 def get_provision_cloudinit(conf=__conf__):
     return conf.get_switch("Provisioning.UseCloudInit", False)
+
 
 def get_allow_reset_sys_user(conf=__conf__):
     return conf.get_switch("Provisioning.AllowResetSysUser", False)
@@ -321,8 +353,23 @@ def get_autoupdate_enabled(conf=__conf__):
 def get_autoupdate_frequency(conf=__conf__):
     return conf.get_int("Autoupdate.Frequency", 3600)
 
+
 def get_enable_overprovisioning(conf=__conf__):
-    return conf.get_switch("EnableOverProvisioning", False)
+    return conf.get_switch("EnableOverProvisioning", True)
+
 
 def get_allow_http(conf=__conf__):
     return conf.get_switch("OS.AllowHTTP", False)
+
+
+def get_disable_agent_file_path(conf=__conf__):
+    return os.path.join(get_lib_dir(conf), DISABLE_AGENT_FILE)
+
+
+def get_cgroups_enforce_limits(conf=__conf__):
+    return conf.get_switch("CGroups.EnforceLimits", False)
+
+
+def get_cgroups_excluded(conf=__conf__):
+    excluded_value = conf.get("CGroups.Excluded", "customscript, runcommand")
+    return [s for s in [i.strip().lower() for i in excluded_value.split(',')] if len(s) > 0] if excluded_value else []

@@ -1,15 +1,17 @@
-Index: walinuxagent-2.2.21+really2.2.20/config/waagent.conf
+Index: walinuxagent-2.2.32/config/waagent.conf
 ===================================================================
---- walinuxagent-2.2.21+really2.2.20.orig/config/waagent.conf
-+++ walinuxagent-2.2.21+really2.2.20/config/waagent.conf
-@@ -3,16 +3,16 @@
+--- walinuxagent-2.2.32.orig/config/waagent.conf
++++ walinuxagent-2.2.32/config/waagent.conf
+@@ -3,7 +3,7 @@
  #
  
  # Enable instance creation
 -Provisioning.Enabled=y
 +Provisioning.Enabled=n
  
- # Rely on cloud-init to provision
+ # Enable extension handling. Do not disable this unless you do not need password reset,
+ # backup, monitoring, or any extension handling whatsoever.
+@@ -13,10 +13,10 @@ Extensions.Enabled=y
  Provisioning.UseCloudInit=n
  
  # Password authentication for root account will be unavailable.
@@ -21,8 +23,8 @@ Index: walinuxagent-2.2.21+really2.2.20/config/waagent.conf
 +Provisioning.RegenerateSshHostKeyPair=n
  
  # Supported values are "rsa", "dsa", "ecdsa", "ed25519", and "auto".
- Provisioning.SshHostKeyPairType=rsa
-@@ -36,14 +36,14 @@ Provisioning.ExecuteCustomData=n
+ # The "auto" option is supported on OpenSSH 5.9 (2011) and later.
+@@ -41,14 +41,14 @@ Provisioning.ExecuteCustomData=n
  Provisioning.AllowResetSysUser=n
  
  # Format if unformatted. If 'n', resource disk will not be mounted.

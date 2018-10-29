@@ -1,4 +1,4 @@
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 
 import os
 import socket
@@ -150,6 +150,15 @@ class DhcpHandler(object):
         return None
 
     def send_dhcp_req(self):
+        """
+        Check if DHCP is available
+        """
+        (dhcp_available, endpoint) =  self.osutil.is_dhcp_available()
+        if not dhcp_available:
+            logger.info("send_dhcp_req: DHCP not available")
+            self.endpoint = endpoint
+            return
+
         """
         Build dhcp request with mac addr
         Configure route to allow dhcp traffic
