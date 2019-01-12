@@ -1,6 +1,6 @@
 # Microsoft Azure Linux Agent
 #
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
 import os
@@ -26,6 +26,7 @@ import azurelinuxagent.common.conf as conf
 import azurelinuxagent.common.logger as logger
 import azurelinuxagent.common.utils.fileutil as fileutil
 
+from azurelinuxagent.common.cgroups import CGroups
 from azurelinuxagent.common.event import add_event, WALAEventOperation
 from azurelinuxagent.common.future import ustr
 from azurelinuxagent.common.osutil import get_osutil
@@ -65,6 +66,9 @@ class DaemonHandler(object):
                     PY_VERSION_MICRO)
 
         self.check_pid()
+        self.initialize_environment()
+
+        CGroups.setup()
 
         # If FIPS is enabled, set the OpenSSL environment variable
         # Note:
@@ -95,6 +99,23 @@ class DaemonHandler(object):
 
         fileutil.write_file(pid_file, ustr(os.getpid()))
 
+    def sleep_if_disabled(self):
+        agent_disabled_file_path = conf.get_disable_agent_file_path()
+        if os.path.exists(agent_disabled_file_path):
+            import threading
+            logger.warn("Disabling the guest agent by sleeping forever; "
+                        "to re-enable, remove {0} and restart"
+                        .format(agent_disabled_file_path))
+            self.running = False
+            disable_event = threading.Event()
+            disable_event.wait()
+
+    def initialize_environment(self):
+        # Create lib dir
+        if not os.path.isdir(conf.get_lib_dir()):
+            fileutil.mkdir(conf.get_lib_dir(), mode=0o700)
+            os.chdir(conf.get_lib_dir())
+
     def daemon(self, child_args=None):
         logger.info("Run daemon")
 
@@ -105,11 +126,6 @@ class DaemonHandler(object):
         self.provision_handler = get_provision_handler()
         self.update_handler = get_update_handler()
 
-        # Create lib dir
-        if not os.path.isdir(conf.get_lib_dir()):
-            fileutil.mkdir(conf.get_lib_dir(), mode=0o700)
-            os.chdir(conf.get_lib_dir())
-
         if conf.get_detect_scvmm_env():
             self.scvmm_handler.run()
 
@@ -117,7 +133,7 @@ class DaemonHandler(object):
             self.resourcedisk_handler.run()
 
         # Always redetermine the protocol start (e.g., wireserver vs.
-        # on-premise) since a VHD can move between environments        
+        # on-premise) since a VHD can move between environments
         self.protocol_util.clear_protocol()
 
         self.provision_handler.run()
@@ -143,6 +159,8 @@ class DaemonHandler(object):
                 logger.error("Error setting up rdma device: %s" % e)
         else:
             logger.info("RDMA capabilities are not enabled, skipping")
+
+        self.sleep_if_disabled()
 
         while self.running:
             self.update_handler.run_latest(child_args=child_args)

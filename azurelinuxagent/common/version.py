@@ -1,4 +1,4 @@
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
 import os
@@ -23,7 +23,7 @@ import sys
 import azurelinuxagent.common.conf as conf
 import azurelinuxagent.common.utils.fileutil as fileutil
 from azurelinuxagent.common.utils.flexible_version import FlexibleVersion
-from azurelinuxagent.common.future import ustr
+from azurelinuxagent.common.future import ustr, get_linux_distribution
 
 
 def get_f5_platform():
@@ -80,14 +80,17 @@ def get_distro():
     elif 'OpenBSD' in platform.system():
         release = re.sub('\-.*\Z', '', ustr(platform.release()))
         osinfo = ['openbsd', release, '', 'openbsd']
-    elif 'linux_distribution' in dir(platform):
-        supported = platform._supported_dists + ('alpine',)
-        osinfo = list(platform.linux_distribution(full_distribution_name=0,
-                                                  supported_dists=supported))
-        full_name = platform.linux_distribution()[0].strip()
-        osinfo.append(full_name)
+    elif 'Linux' in platform.system():
+        osinfo = get_linux_distribution(0, 'alpine')
+    elif 'NS-BSD' in platform.system():
+        release = re.sub('\-.*\Z', '', ustr(platform.release()))
+        osinfo = ['nsbsd', release, '', 'nsbsd']
     else:
-        osinfo = platform.dist()
+        try:
+            # dist() removed in Python 3.7
+            osinfo = list(platform.dist()) + ['']
+        except:
+            osinfo = ['UNKNOWN', 'FFFF', '', '']
 
     # The platform.py lib has issue with detecting oracle linux distribution.
     # Merge the following patch provided by oracle as a temporary fix.
@@ -106,6 +109,9 @@ def get_distro():
     if os.path.exists("/etc/cp-release"):
         osinfo = get_checkpoint_platform()
 
+    if os.path.exists("/home/guestshell/azure"):
+        osinfo = ['iosxe', 'csr1000v', '', 'Cisco IOSXE Linux']
+
     # Remove trailing whitespace and quote in distro name
     osinfo[0] = osinfo[0].strip('"').strip(' ').lower()
     return osinfo
@@ -113,7 +119,7 @@ def get_distro():
 
 AGENT_NAME = "WALinuxAgent"
 AGENT_LONG_NAME = "Azure Linux Agent"
-AGENT_VERSION = '2.2.20'
+AGENT_VERSION = '2.2.32.2'
 AGENT_LONG_VERSION = "{0}-{1}".format(AGENT_NAME, AGENT_VERSION)
 AGENT_DESCRIPTION = """
 The Azure Linux Agent supports the provisioning and running of Linux
@@ -161,13 +167,16 @@ def set_current_agent():
         version = AGENT_VERSION
     return agent, FlexibleVersion(version)
 
+
 def is_agent_package(path):
     path = os.path.basename(path)
     return not re.match(AGENT_PKG_PATTERN, path) is None
 
+
 def is_agent_path(path):
     path = os.path.basename(path)
     return not re.match(AGENT_NAME_PATTERN, path) is None
+
 
 CURRENT_AGENT, CURRENT_VERSION = set_current_agent()
 

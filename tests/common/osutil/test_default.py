@@ -1,4 +1,4 @@
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,21 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
 import socket
 import glob
 import mock
+import traceback
 
 import azurelinuxagent.common.osutil.default as osutil
 import azurelinuxagent.common.utils.shellutil as shellutil
+import azurelinuxagent.common.utils.textutil as textutil
 from azurelinuxagent.common.exception import OSUtilError
 from azurelinuxagent.common.future import ustr
 from azurelinuxagent.common.osutil import get_osutil
-from azurelinuxagent.common.utils import fileutil
-from azurelinuxagent.common.utils.flexible_version import FlexibleVersion
 from tests.tools import *
+
+
+actual_get_proc_net_route = 'azurelinuxagent.common.osutil.default.DefaultOSUtil._get_proc_net_route'
+
+def fake_is_loopback(_, iface):
+    return iface.startswith('lo')
+
+
+def running_under_travis():
+    return 'TRAVIS' in os.environ and os.environ['TRAVIS'] == 'true'
 
 
 class TestOSUtil(AgentTestCase):
@@ -88,7 +98,83 @@ class TestOSUtil(AgentTestCase):
                         self.assertTrue(msg in ustr(ose))
                         self.assertTrue(patch_run.call_count == 6)
 
-    def test_get_first_if(self):
+    def test_empty_proc_net_route(self):
+        routing_table = ""
+
+        mo = mock.mock_open(read_data=routing_table)
+        with patch(open_patch(), mo):
+            self.assertEqual(len(osutil.DefaultOSUtil().read_route_table()), 0)
+
+    def test_no_routes(self):
+        routing_table = 'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT        \n'
+
+        mo = mock.mock_open(read_data=routing_table)
+        with patch(open_patch(), mo):
+            raw_route_list = osutil.DefaultOSUtil().read_route_table()
+
+        self.assertEqual(len(osutil.DefaultOSUtil().get_list_of_routes(raw_route_list)), 0)
+
+    def test_bogus_proc_net_route(self):
+        routing_table = 'Iface\tDestination\tGateway \tFlags\t\tUse\tMetric\t\neth0\t00000000\t00000000\t0001\t\t0\t0\n'
+
+        mo = mock.mock_open(read_data=routing_table)
+        with patch(open_patch(), mo):
+            raw_route_list = osutil.DefaultOSUtil().read_route_table()
+
+        self.assertEqual(len(osutil.DefaultOSUtil().get_list_of_routes(raw_route_list)), 0)
+
+    def test_valid_routes(self):
+        routing_table = \
+            'Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT   \n' \
+            'eth0\t00000000\tC1BB910A\t0003\t0\t0\t0\t00000000\t0\t0\t0    \n' \
+            'eth0\tC0BB910A\t00000000\t0001\t0\t0\t0\tC0FFFFFF\t0\t0\t0    \n' \
+            'eth0\t10813FA8\tC1BB910A\t000F\t0\t0\t0\tFFFFFFFF\t0\t0\t0    \n' \
+            'eth0\tFEA9FEA9\tC1BB910A\t0007\t0\t0\t0\tFFFFFFFF\t0\t0\t0    \n' \
+            'docker0\t002BA8C0\t00000000\t0001\t0\t0\t10\t00FFFFFF\t0\t0\t0    \n'
+        known_sha1_hash = b'\x1e\xd1k\xae[\xf8\x9b\x1a\x13\xd0\xbbT\xa4\xe3Y\xa3\xdd\x0b\xbd\xa9'
+
+        mo = mock.mock_open(read_data=routing_table)
+        with patch(open_patch(), mo):
+            raw_route_list = osutil.DefaultOSUtil().read_route_table()
+
+        self.assertEqual(len(raw_route_list), 6)
+        self.assertEqual(textutil.hash_strings(raw_route_list), known_sha1_hash)
+
+        route_list = osutil.DefaultOSUtil().get_list_of_routes(raw_route_list)
+
+        self.assertEqual(len(route_list), 5)
+        self.assertEqual(route_list[0].gateway_quad(), '10.145.187.193')
+        self.assertEqual(route_list[1].gateway_quad(), '0.0.0.0')
+        self.assertEqual(route_list[1].mask_quad(), '255.255.255.192')
+        self.assertEqual(route_list[2].destination_quad(), '168.63.129.16')
+        self.assertEqual(route_list[1].flags, 1)
+        self.assertEqual(route_list[2].flags, 15)
+        self.assertEqual(route_list[3].flags, 7)
+        self.assertEqual(route_list[3].metric, 0)
+        self.assertEqual(route_list[4].metric, 10)
+        self.assertEqual(route_list[0].interface, 'eth0')
+        self.assertEqual(route_list[4].interface, 'docker0')
+
+    @patch('azurelinuxagent.common.osutil.default.DefaultOSUtil.get_primary_interface', return_value='eth0')
+    @patch('azurelinuxagent.common.osutil.default.DefaultOSUtil._get_all_interfaces', return_value={'eth0':'10.0.0.1'})
+    @patch('azurelinuxagent.common.osutil.default.DefaultOSUtil.is_loopback', fake_is_loopback)
+    def test_get_first_if(self, get_all_interfaces_mock, get_primary_interface_mock):
+        """
+        Validate that the agent can find the first active non-loopback
+        interface.
+
+        This test case used to run live, but not all developers have an eth*
+        interface. It is perfectly valid to have a br*, but this test does not
+        account for that.
+        """
+        ifname, ipaddr = osutil.DefaultOSUtil().get_first_if()
+        self.assertEqual(ifname, 'eth0')
+        self.assertEqual(ipaddr, '10.0.0.1')
+
+    @patch('azurelinuxagent.common.osutil.default.DefaultOSUtil.get_primary_interface', return_value='bogus0')
+    @patch('azurelinuxagent.common.osutil.default.DefaultOSUtil._get_all_interfaces', return_value={'eth0':'10.0.0.1', 'lo': '127.0.0.1'})
+    @patch('azurelinuxagent.common.osutil.default.DefaultOSUtil.is_loopback', fake_is_loopback)
+    def test_get_first_if_nosuchprimary(self, get_all_interfaces_mock, get_primary_interface_mock):
         ifname, ipaddr = osutil.DefaultOSUtil().get_first_if()
         self.assertTrue(ifname.startswith('eth'))
         self.assertTrue(ipaddr is not None)
@@ -97,9 +183,31 @@ class TestOSUtil(AgentTestCase):
         except socket.error:
             self.fail("not a valid ip address")
 
+    def test_get_first_if_all_loopback(self):
+        fake_ifaces = {'lo':'127.0.0.1'}
+        with patch.object(osutil.DefaultOSUtil, 'get_primary_interface', return_value='bogus0'):
+            with patch.object(osutil.DefaultOSUtil, '_get_all_interfaces', return_value=fake_ifaces):
+                self.assertEqual(('', ''), osutil.DefaultOSUtil().get_first_if())
+
+    def test_get_all_interfaces(self):
+        loopback_count = 0
+        non_loopback_count = 0
+
+        for iface in osutil.DefaultOSUtil()._get_all_interfaces():
+            if iface == 'lo':
+                loopback_count += 1
+            else:
+                non_loopback_count += 1
+
+        self.assertEqual(loopback_count, 1, 'Exactly 1 loopback network interface should exist')
+        self.assertGreater(loopback_count, 0, 'At least 1 non-loopback network interface should exist')
+
     def test_isloopback(self):
-        self.assertTrue(osutil.DefaultOSUtil().is_loopback(b'lo'))
-        self.assertFalse(osutil.DefaultOSUtil().is_loopback(b'eth0'))
+        for iface in osutil.DefaultOSUtil()._get_all_interfaces():
+            if iface == 'lo':
+                self.assertTrue(osutil.DefaultOSUtil().is_loopback(iface))
+            else:
+                self.assertFalse(osutil.DefaultOSUtil().is_loopback(iface))
 
     def test_isprimary(self):
         routing_table = "\
@@ -178,6 +286,7 @@ class TestOSUtil(AgentTestCase):
             try:
                 osutil.DefaultOSUtil().get_first_if()[0]
             except Exception as e:
+                print(traceback.format_exc())
                 exception = True
             self.assertFalse(exception)
 
@@ -199,12 +308,23 @@ class TestOSUtil(AgentTestCase):
                 self.assertTrue(endpoint is not None)
                 self.assertEqual(endpoint, "168.63.129.16")
 
+    def test_dhcp_lease_custom_dns(self):
+        """
+        Validate that the wireserver address is coming from option 245
+        (on default configurations the address is also available in the domain-name-servers option, but users
+         may set up a custom dns server on their vnet)
+        """
+        with patch.object(glob, "glob", return_value=['/var/lib/dhcp/dhclient.eth0.leases']):
+            with patch(open_patch(), mock.mock_open(read_data=load_data("dhcp.leases.custom.dns"))):
+                endpoint = get_osutil(distro_name='ubuntu', distro_version='14.04').get_dhcp_lease_endpoint()
+                self.assertEqual(endpoint, "168.63.129.16")
+
     def test_dhcp_lease_multi(self):
         with patch.object(glob, "glob", return_value=['/var/lib/dhcp/dhclient.eth0.leases']):
             with patch(open_patch(), mock.mock_open(read_data=load_data("dhcp.leases.multi"))):
                 endpoint = get_osutil(distro_name='ubuntu', distro_version='12.04').get_dhcp_lease_endpoint()
                 self.assertTrue(endpoint is not None)
-                self.assertEqual(endpoint, "second")
+                self.assertEqual(endpoint, "168.63.129.2")
 
     def test_get_total_mem(self):
         """
@@ -516,6 +636,16 @@ Match host 192.168.1.2\n\
         self.assertEqual(-1, util.get_firewall_dropped_packets("not used"))
 
     @patch('azurelinuxagent.common.utils.shellutil.run_get_output')
+    def test_get_firewall_dropped_packets_transient_error_ignored(self, mock_output):
+        osutil._enable_firewall = True
+        util = osutil.DefaultOSUtil()
+
+        mock_output.side_effect = [
+            (0, "iptables v{0}".format(osutil.IPTABLES_LOCKING_VERSION)),
+            (3, "can't initialize iptables table `security': iptables who? (do you need to insmod?)")]
+        self.assertEqual(0, util.get_firewall_dropped_packets("not used"))
+
+    @patch('azurelinuxagent.common.utils.shellutil.run_get_output')
     def test_get_firewall_dropped_packets(self, mock_output):
         osutil._enable_firewall = True
         util = osutil.DefaultOSUtil()
@@ -638,6 +768,34 @@ Chain OUTPUT (policy ACCEPT 104 packets, 43628 bytes)
         ])
         self.assertFalse(osutil._enable_firewall)
 
+    @patch('azurelinuxagent.common.utils.shellutil.run_get_output')
+    @patch('azurelinuxagent.common.utils.shellutil.run')
+    def test_enable_firewall_checks_for_invalid_iptables_options(self, mock_run, mock_output):
+        osutil._enable_firewall = True
+        util = osutil.DefaultOSUtil()
+
+        dst = '1.2.3.4'
+        version = "iptables v{0}".format(osutil.IPTABLES_LOCKING_VERSION)
+        wait = "-w"
+
+        # iptables uses the following exit codes
+        #  0 - correct function
+        #  1 - other errors
+        #  2 - errors which appear to be caused by invalid or abused command
+        #      line parameters
+        mock_run.side_effect = [2]
+        mock_output.return_value = (0, version)
+
+        self.assertFalse(util.enable_firewall(dst_ip='1.2.3.4', uid=42))
+        self.assertFalse(osutil._enable_firewall)
+
+        mock_run.assert_has_calls([
+            call(osutil.FIREWALL_DROP.format(wait, "C", dst), chk_err=False),
+        ])
+        mock_output.assert_has_calls([
+            call(osutil.IPTABLES_VERSION)
+        ])
+
     @patch('os.getuid', return_value=42)
     @patch('azurelinuxagent.common.utils.shellutil.run_get_output')
     @patch('azurelinuxagent.common.utils.shellutil.run')
@@ -670,12 +828,20 @@ Chain OUTPUT (policy ACCEPT 104 packets, 43628 bytes)
         version = "iptables v{0}".format(osutil.IPTABLES_LOCKING_VERSION)
         wait = "-w"
 
-        mock_run.side_effect = [0, 0]
+        mock_run.side_effect = [0, 1, 0, 1, 0, 1]
         mock_output.side_effect = [(0, version), (0, "Output")]
-        self.assertTrue(util.remove_firewall())
+        self.assertTrue(util.remove_firewall(dst, uid))
 
         mock_run.assert_has_calls([
-            call(osutil.FIREWALL_FLUSH.format(wait), chk_err=True)
+            # delete rules < 2.2.26
+            call(osutil.FIREWALL_DELETE_CONNTRACK_ACCEPT.format(wait, dst), chk_err=False),
+            call(osutil.FIREWALL_DELETE_CONNTRACK_ACCEPT.format(wait, dst), chk_err=False),
+            call(osutil.FIREWALL_DELETE_OWNER_ACCEPT.format(wait, dst, uid), chk_err=False),
+            call(osutil.FIREWALL_DELETE_OWNER_ACCEPT.format(wait, dst, uid), chk_err=False),
+
+            # delete rules >= 2.2.26
+            call(osutil.FIREWALL_DELETE_CONNTRACK_DROP.format(wait, dst), chk_err=False),
+            call(osutil.FIREWALL_DELETE_CONNTRACK_DROP.format(wait, dst), chk_err=False),
         ])
         mock_output.assert_has_calls([
             call(osutil.IPTABLES_VERSION)
@@ -689,15 +855,17 @@ Chain OUTPUT (policy ACCEPT 104 packets, 43628 bytes)
         osutil._enable_firewall = True
         util = osutil.DefaultOSUtil()
 
+        dst_ip='1.2.3.4'
+        uid=42
         version = "iptables v{0}".format(osutil.IPTABLES_LOCKING_VERSION)
         wait = "-w"
 
-        mock_run.side_effect = [1, 0]
+        mock_run.side_effect = [2]
         mock_output.side_effect = [(0, version), (1, "Output")]
-        self.assertFalse(util.remove_firewall())
+        self.assertFalse(util.remove_firewall(dst_ip, uid))
 
         mock_run.assert_has_calls([
-            call(osutil.FIREWALL_FLUSH.format(wait), chk_err=True)
+            call(osutil.FIREWALL_DELETE_CONNTRACK_ACCEPT.format(wait, dst_ip), chk_err=False),
         ])
         mock_output.assert_has_calls([
             call(osutil.IPTABLES_VERSION)
@@ -712,6 +880,17 @@ Chain OUTPUT (policy ACCEPT 104 packets, 43628 bytes)
 
         self.assertTrue(mock_run.call_count == 1)
         self.assertTrue(mock_output.call_count == 1)
+
+    @skip_if_predicate_true(running_under_travis, "The ip command isn't available in Travis")
+    def test_get_nic_state(self):
+        state = osutil.DefaultOSUtil().get_nic_state()
+        self.assertNotEqual(state, {})
+        self.assertGreater(len(state.keys()), 1)
+
+        another_state = osutil.DefaultOSUtil().get_nic_state()
+        name = list(another_state.keys())[0]
+        another_state[name].add_ipv4("xyzzy")
+        self.assertNotEqual(state, another_state)
 
 
 if __name__ == '__main__':

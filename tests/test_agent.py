@@ -1,4 +1,4 @@
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
-import mock
 import os.path
-import sys
 
 from azurelinuxagent.agent import *
 from azurelinuxagent.common.conf import *
@@ -28,10 +26,13 @@ EXPECTED_CONFIGURATION = \
 """AutoUpdate.Enabled = True
 AutoUpdate.GAFamily = Prod
 Autoupdate.Frequency = 3600
+CGroups.EnforceLimits = False
+CGroups.Excluded = customscript,runcommand
 DVD.MountPoint = /mnt/cdrom/secure
 DetectScvmmEnv = False
-EnableOverProvisioning = False
+EnableOverProvisioning = True
 Extension.LogDir = /var/log/azure
+Extensions.Enabled = True
 HttpProxy.Host = None
 HttpProxy.Port = None
 Lib.Dir = /var/lib/waagent
@@ -39,7 +40,7 @@ Logs.Verbose = False
 OS.AllowHTTP = False
 OS.CheckRdmaDriver = False
 OS.EnableFIPS = True
-OS.EnableFirewall = True
+OS.EnableFirewall = False
 OS.EnableRDMA = False
 OS.HomeDir = /home
 OS.OpensslPath = /usr/bin/openssl
@@ -119,7 +120,7 @@ class TestAgent(AgentTestCase):
         agent.daemon()
 
         mock_daemon.run.assert_called_once_with(child_args=None)
-        mock_load.assert_called_once()
+        self.assertEqual(1, mock_load.call_count)
 
     @patch("azurelinuxagent.daemon.get_daemon_handler")
     @patch("azurelinuxagent.common.conf.load_conf_from_file")
@@ -133,7 +134,7 @@ class TestAgent(AgentTestCase):
         agent.daemon()
 
         mock_daemon.run.assert_called_once_with(child_args="-configuration-path:/foo/bar.conf")
-        mock_load.assert_called_once()
+        self.assertEqual(1, mock_load.call_count)
 
     @patch("azurelinuxagent.common.conf.get_ext_log_dir")
     def test_agent_ensures_extension_log_directory(self, mock_dir):
@@ -158,7 +159,7 @@ class TestAgent(AgentTestCase):
                     conf_file_path=os.path.join(data_dir, "test_waagent.conf"))
         self.assertTrue(os.path.isfile(ext_log_dir))
         self.assertFalse(os.path.isdir(ext_log_dir))
-        mock_log.assert_called_once()
+        self.assertEqual(1, mock_log.call_count)
 
     def test_agent_get_configuration(self):
         Agent(False, conf_file_path=os.path.join(data_dir, "test_waagent.conf"))
@@ -168,3 +169,22 @@ class TestAgent(AgentTestCase):
         for k in sorted(configuration.keys()):
             actual_configuration.append("{0} = {1}".format(k, configuration[k]))
         self.assertEqual(EXPECTED_CONFIGURATION, actual_configuration)
+
+    def test_agent_usage_message(self):
+        message = usage()
+
+        # Python 2.6 does not have assertIn()
+        self.assertTrue("-verbose" in message)
+        self.assertTrue("-force" in message)
+        self.assertTrue("-help" in message)
+        self.assertTrue("-configuration-path" in message)
+        self.assertTrue("-deprovision" in message)
+        self.assertTrue("-register-service" in message)
+        self.assertTrue("-version" in message)
+        self.assertTrue("-daemon" in message)
+        self.assertTrue("-start" in message)
+        self.assertTrue("-run-exthandlers" in message)
+        self.assertTrue("-show-configuration" in message)
+
+        # sanity check
+        self.assertFalse("-not-a-valid-option" in message)

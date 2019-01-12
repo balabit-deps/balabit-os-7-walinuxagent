@@ -1,4 +1,4 @@
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
+
 import azurelinuxagent.common.logger as logger
-from azurelinuxagent.common.utils.textutil import Version
 from azurelinuxagent.common.version import *
 from .default import DefaultOSUtil
 from .arch import ArchUtil
@@ -27,10 +27,15 @@ from .freebsd import FreeBSDOSUtil
 from .openbsd import OpenBSDOSUtil
 from .redhat import RedhatOSUtil, Redhat6xOSUtil
 from .suse import SUSEOSUtil, SUSE11OSUtil
-from .ubuntu import UbuntuOSUtil, Ubuntu12OSUtil, Ubuntu14OSUtil, UbuntuSnappyOSUtil
+from .ubuntu import UbuntuOSUtil, Ubuntu12OSUtil, Ubuntu14OSUtil, \
+    UbuntuSnappyOSUtil, Ubuntu16OSUtil, Ubuntu18OSUtil
 from .alpine import AlpineOSUtil
 from .bigip import BigIpOSUtil
 from .gaia import GaiaOSUtil
+from .iosxe import IosxeOSUtil
+from .nsbsd import NSBSDOSUtil
+
+from distutils.version import LooseVersion as Version
 
 
 def get_osutil(distro_name=DISTRO_NAME,
@@ -46,10 +51,14 @@ def get_osutil(distro_name=DISTRO_NAME,
         return ClearLinuxUtil()
 
     if distro_name == "ubuntu":
-        if Version(distro_version) == Version("12.04") or Version(distro_version) == Version("12.10"):
+        if Version(distro_version) in [Version("12.04"), Version("12.10")]:
             return Ubuntu12OSUtil()
-        elif Version(distro_version) == Version("14.04") or Version(distro_version) == Version("14.10"):
+        elif Version(distro_version) in [Version("14.04"), Version("14.10")]:
             return Ubuntu14OSUtil()
+        elif Version(distro_version) in [Version('16.04'), Version('16.10'), Version('17.04')]:
+            return Ubuntu16OSUtil()
+        elif Version(distro_version) in [Version('18.04')]:
+            return Ubuntu18OSUtil()
         elif distro_full_name == "Snappy Ubuntu Core":
             return UbuntuSnappyOSUtil()
         else:
@@ -64,7 +73,7 @@ def get_osutil(distro_name=DISTRO_NAME,
     if distro_name == "coreos" or distro_code_name == "coreos":
         return CoreOSUtil()
 
-    if distro_name == "suse":
+    if distro_name in ("suse", "sles", "opensuse"):
         if distro_full_name == 'SUSE Linux Enterprise Server' \
                 and Version(distro_version) < Version('12') \
                 or distro_full_name == 'openSUSE' and Version(distro_version) < Version('13.2'):
@@ -97,6 +106,12 @@ def get_osutil(distro_name=DISTRO_NAME,
 
     elif distro_name == "gaia":
         return GaiaOSUtil()
+
+    elif distro_name == "iosxe":
+        return IosxeOSUtil()
+
+    elif distro_name == "nsbsd":
+        return NSBSDOSUtil()
 
     else:
         logger.warn("Unable to load distro implementation for {0}. Using "

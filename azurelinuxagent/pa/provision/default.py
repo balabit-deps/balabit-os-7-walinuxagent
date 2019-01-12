@@ -1,4 +1,4 @@
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
 """
@@ -77,7 +77,7 @@ class ProvisionHandler(object):
             logger.info("Copying ovf-env.xml")
             ovf_env = self.protocol_util.copy_ovf_env()
 
-            self.protocol_util.get_protocol_by_file()
+            self.protocol_util.get_protocol(by_file=True)
             self.report_not_ready("Provisioning", "Starting")
             logger.info("Starting provisioning")
 
@@ -88,17 +88,20 @@ class ProvisionHandler(object):
 
             self.write_provisioned()
 
-            self.report_event("Provision succeed",
+            self.report_event("Provisioning succeeded ({0}s)".format(self._get_uptime_seconds()),
                 is_success=True,
                 duration=elapsed_milliseconds(utc_start))
+
+            self.handle_provision_guest_agent(ovf_env.provision_guest_agent)
 
             self.report_ready(thumbprint)
             logger.info("Provisioning complete")
 
         except (ProtocolError, ProvisionError) as e:
+            msg = "Provisioning failed: {0} ({1}s)".format(ustr(e), self._get_uptime_seconds())
+            logger.error(msg)
             self.report_not_ready("ProvisioningFailed", ustr(e))
-            self.report_event(ustr(e))
-            logger.error("Provisioning failed: {0}", ustr(e))
+            self.report_event(msg, is_success=False)
             return
 
     @staticmethod
@@ -110,19 +113,29 @@ class ProvisionHandler(object):
             pids = []
         for pid in pids:
             try:
-                pname = open(os.path.join('/proc', pid, 'cmdline'), 'rb').read()
-                if CLOUD_INIT_REGEX.match(pname):
-                    is_running = True
-                    msg = "cloud-init is running [PID {0}, {1}]".format(pid,
-                                                                        pname)
-                    if is_expected:
-                        logger.verbose(msg)
-                    else:
-                        logger.error(msg)
-                    break
+                with open(os.path.join('/proc', pid, 'cmdline'), 'rb') as fh:
+                    pname = fh.read()
+                    if CLOUD_INIT_REGEX.match(pname):
+                        is_running = True
+                        msg = "cloud-init is running [PID {0}, {1}]".format(pid,
+                                                                            pname)
+                        if is_expected:
+                            logger.verbose(msg)
+                        else:
+                            logger.error(msg)
+                        break
             except IOError:
                 continue
         return is_running == is_expected
+
+    @staticmethod
+    def _get_uptime_seconds():
+        try:
+            with open('/proc/uptime') as fh:
+                uptime, _ = fh.readline().split()
+                return uptime
+        except:
+            return 0
 
     def reg_ssh_host_key(self):
         keypair_type = conf.get_ssh_host_keypair_type()
@@ -189,6 +202,19 @@ class ProvisionHandler(object):
         fileutil.write_file(
             self.provisioned_file_path(),
             get_osutil().get_instance_id())
+
+    @staticmethod
+    def write_agent_disabled():
+        logger.warn("Disabling guest agent in accordance with ovf-env.xml")
+        fileutil.write_file(conf.get_disable_agent_file_path(), '')
+
+    def handle_provision_guest_agent(self, provision_guest_agent):
+        self.report_event(message=provision_guest_agent,
+                          is_success=True,
+                          duration=0,
+                          operation=WALAEventOperation.ProvisionGuestAgent)
+        if provision_guest_agent and provision_guest_agent.lower() == 'false':
+            self.write_agent_disabled()
 
     def provision(self, ovfenv):
         logger.info("Handle ovf-env.xml.")
@@ -264,12 +290,13 @@ class ProvisionHandler(object):
             logger.info("Deploy ssh key pairs.")
             self.osutil.deploy_ssh_keypair(ovfenv.username, keypair)
 
-    def report_event(self, message, is_success=False, duration=0):
+    def report_event(self, message, is_success=False, duration=0,
+                     operation=WALAEventOperation.Provision):
         add_event(name=AGENT_NAME,
                     message=message,
                     duration=duration,
                     is_success=is_success,
-                    op=WALAEventOperation.Provision)
+                    op=operation)
 
     def report_not_ready(self, sub_status, description):
         status = ProvisionStatus(status="NotReady", subStatus=sub_status,

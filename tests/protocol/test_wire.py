@@ -1,4 +1,4 @@
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,13 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
 import glob
+import stat
+import zipfile
 
 from azurelinuxagent.common import event
 from azurelinuxagent.common.protocol.wire import *
+from azurelinuxagent.common.utils.shellutil import run_get_output
+from tests.common.osutil.test_default import running_under_travis
 from tests.protocol.mockwiredata import *
 
 data_with_bom = b'\xef\xbb\xbfhehe'
@@ -28,13 +32,14 @@ wireserver_url = '168.63.129.16'
 
 @patch("time.sleep")
 @patch("azurelinuxagent.common.protocol.wire.CryptUtil")
+@patch("azurelinuxagent.common.protocol.healthservice.HealthService._report")
 class TestWireProtocol(AgentTestCase):
 
     def setUp(self):
         super(TestWireProtocol, self).setUp()
         HostPluginProtocol.set_default_channel(False)
     
-    def _test_getters(self, test_data, MockCryptUtil, _):
+    def _test_getters(self, test_data, __, MockCryptUtil, _):
         MockCryptUtil.side_effect = test_data.mock_crypt_util
 
         with patch.object(restutil, 'http_get', test_data.mock_http_get):
@@ -79,7 +84,8 @@ class TestWireProtocol(AgentTestCase):
         test_data = WireProtocolData(DATA_FILE_EXT_NO_PUBLIC)
         self._test_getters(test_data, *args)
 
-    def test_getters_with_stale_goal_state(self, *args):
+    @patch("azurelinuxagent.common.protocol.healthservice.HealthService.report_host_plugin_extension_artifact")
+    def test_getters_with_stale_goal_state(self, patch_report, *args):
         test_data = WireProtocolData(DATA_FILE)
         test_data.emulate_stale_goal_state = True
 
@@ -92,10 +98,9 @@ class TestWireProtocol(AgentTestCase):
         #    fetched often; however, the dependent documents, such as the
         #    HostingEnvironmentConfig, will be retrieved the expected number
         self.assertEqual(2, test_data.call_counts["hostingenvuri"])
+        self.assertEqual(1, patch_report.call_count)
 
-    def test_call_storage_kwargs(self,
-                                 mock_cryptutil,
-                                 mock_sleep):
+    def test_call_storage_kwargs(self, *args):
         from azurelinuxagent.common.utils import restutil
         with patch.object(restutil, 'http_get') as http_patch:
             http_req = restutil.http_get
@@ -153,33 +158,59 @@ class TestWireProtocol(AgentTestCase):
             host_plugin = wire_protocol_client.get_host_plugin()
             self.assertEqual(goal_state.container_id, host_plugin.container_id)
             self.assertEqual(goal_state.role_config_name, host_plugin.role_config_name)
-            patch_get_goal_state.assert_called_once()
+            self.assertEqual(1, patch_get_goal_state.call_count)
 
-    def test_download_ext_handler_pkg_fallback(self, *args):
+    @patch("azurelinuxagent.common.utils.restutil.http_request", side_effect=IOError)
+    @patch("azurelinuxagent.common.protocol.wire.WireClient.get_host_plugin")
+    @patch("azurelinuxagent.common.protocol.hostplugin.HostPluginProtocol.get_artifact_request")
+    def test_download_ext_handler_pkg_fallback(self, patch_request, patch_get_host, patch_http, *args):
         ext_uri = 'extension_uri'
         host_uri = 'host_uri'
-        mock_host = HostPluginProtocol(host_uri, 'container_id', 'role_config')
-        with patch.object(restutil,
-                          "http_request",
-                          side_effect=IOError) as patch_http:
-            with patch.object(WireClient,
-                              "get_host_plugin",
-                              return_value=mock_host):
-                with patch.object(HostPluginProtocol,
-                                  "get_artifact_request",
-                                  return_value=[host_uri, {}]) as patch_request:
+        destination = 'destination'
+        patch_get_host.return_value = HostPluginProtocol(host_uri, 'container_id', 'role_config')
+        patch_request.return_value = [host_uri, {}]
 
-                    WireProtocol(wireserver_url).download_ext_handler_pkg(ext_uri)
+        WireProtocol(wireserver_url).download_ext_handler_pkg(ext_uri, destination)
 
-                    self.assertEqual(patch_http.call_count, 2)
-                    self.assertEqual(patch_request.call_count, 1)
+        self.assertEqual(patch_http.call_count, 2)
+        self.assertEqual(patch_request.call_count, 1)
+        self.assertEqual(patch_http.call_args_list[0][0][1], ext_uri)
+        self.assertEqual(patch_http.call_args_list[1][0][1], host_uri)
 
-                    self.assertEqual(patch_http.call_args_list[0][0][1],
-                                     ext_uri)
-                    self.assertEqual(patch_http.call_args_list[1][0][1],
-                                     host_uri)
+    @skip_if_predicate_true(running_under_travis, "Travis unit tests should not have external dependencies")
+    def test_download_ext_handler_pkg_stream(self, *args):
+        ext_uri = 'https://dcrdata.blob.core.windows.net/files/packer.zip'
+        tmp = tempfile.mkdtemp()
+        destination = os.path.join(tmp, 'test_download_ext_handler_pkg_stream.zip')
 
+        success = WireProtocol(wireserver_url).download_ext_handler_pkg(ext_uri, destination)
+        self.assertTrue(success)
+        self.assertTrue(os.path.exists(destination))
+
+        # verify size
+        self.assertEqual(18380915, os.stat(destination).st_size)
+
+        # verify unzip
+        zipfile.ZipFile(destination).extractall(tmp)
+        packer = os.path.join(tmp, 'packer')
+        self.assertTrue(os.path.exists(packer))
+        fileutil.chmod(packer, os.stat(packer).st_mode | stat.S_IXUSR)
+
+        # verify unpacked size
+        self.assertEqual(87393596, os.stat(packer).st_size)
+
+        # execute, verify result
+        packer_version = '{0} --version'.format(packer)
+        rc, stdout = run_get_output(packer_version)
+        self.assertEqual(0, rc)
+        self.assertEqual('1.2.5\n', stdout)
+
+
+    @patch("azurelinuxagent.common.protocol.wire.WireClient.update_goal_state")
     def test_upload_status_blob_default(self, *args):
+        """
+        Default status blob method is HostPlugin.
+        """
         vmstatus = VMStatus(message="Ready", status="Ready")
         wire_protocol_client = WireProtocol(wireserver_url).client
         wire_protocol_client.ext_conf = ExtensionsConfig(None)
@@ -193,10 +224,14 @@ class TestWireProtocol(AgentTestCase):
                     HostPluginProtocol.set_default_channel(False)
                     wire_protocol_client.upload_status_blob()
 
-                    patch_default_upload.assert_called_once_with(testurl)
-                    patch_get_goal_state.assert_not_called()
-                    patch_host_ga_plugin_upload.assert_not_called()
+                    # do not call the direct method unless host plugin fails
+                    patch_default_upload.assert_not_called()
+                    # host plugin always fetches a goal state
+                    patch_get_goal_state.assert_called_once_with()
+                    # host plugin uploads the status blob
+                    patch_host_ga_plugin_upload.assert_called_once_with(ANY, testurl, 'BlockBlob')
 
+    @patch("azurelinuxagent.common.protocol.wire.WireClient.update_goal_state")
     def test_upload_status_blob_host_ga_plugin(self, *args):
         vmstatus = VMStatus(message="Ready", status="Ready")
         wire_protocol_client = WireProtocol(wireserver_url).client
@@ -217,13 +252,14 @@ class TestWireProtocol(AgentTestCase):
                     HostPluginProtocol.set_default_channel(False)
                     wire_protocol_client.get_goal_state = Mock(return_value=goal_state)
                     wire_protocol_client.upload_status_blob()
-                    patch_default_upload.assert_called_once_with(testurl)
-                    wire_protocol_client.get_goal_state.assert_called_once()
+                    patch_default_upload.assert_not_called()
+                    self.assertEqual(1, wire_protocol_client.get_goal_state.call_count)
                     patch_http.assert_called_once_with(testurl, wire_protocol_client.status_blob)
-                    self.assertTrue(HostPluginProtocol.is_default_channel())
-                    HostPluginProtocol.set_default_channel(False)
+                    self.assertFalse(HostPluginProtocol.is_default_channel())
 
-    def test_upload_status_blob_unknown_type_assumes_block(self, *args):
+    @patch("azurelinuxagent.common.protocol.wire.WireClient.update_goal_state")
+    @patch("azurelinuxagent.common.protocol.hostplugin.HostPluginProtocol.ensure_initialized")
+    def test_upload_status_blob_unknown_type_assumes_block(self, _, __, *args):
         vmstatus = VMStatus(message="Ready", status="Ready")
         wire_protocol_client = WireProtocol(wireserver_url).client
         wire_protocol_client.ext_conf = ExtensionsConfig(None)
@@ -239,8 +275,9 @@ class TestWireProtocol(AgentTestCase):
 
                     patch_prepare.assert_called_once_with("BlockBlob")
                     patch_default_upload.assert_called_once_with(testurl)
-                    patch_get_goal_state.assert_not_called()
+                    patch_get_goal_state.assert_called_once_with()
 
+    @patch("azurelinuxagent.common.protocol.wire.WireClient.update_goal_state")
     def test_upload_status_blob_reports_prepare_error(self, *args):
         vmstatus = VMStatus(message="Ready", status="Ready")
         wire_protocol_client = WireProtocol(wireserver_url).client
@@ -250,13 +287,9 @@ class TestWireProtocol(AgentTestCase):
         wire_protocol_client.status_blob.vm_status = vmstatus
         goal_state = GoalState(WireProtocolData(DATA_FILE).goal_state)
 
-        with patch.object(StatusBlob, "prepare",
-                    side_effect=Exception) as mock_prepare:
-            with patch.object(WireClient, "report_status_event") as mock_event:
-                wire_protocol_client.upload_status_blob()
-
-                mock_prepare.assert_called_once()
-                mock_event.assert_called_once()
+        with patch.object(StatusBlob, "prepare", side_effect=Exception) as mock_prepare:
+            self.assertRaises(ProtocolError, wire_protocol_client.upload_status_blob)
+            self.assertEqual(1, mock_prepare.call_count)
 
     def test_get_in_vm_artifacts_profile_blob_not_available(self, *args):
         wire_protocol_client = WireProtocol(wireserver_url).client
@@ -297,6 +330,26 @@ class TestWireProtocol(AgentTestCase):
 
             host_plugin_get_artifact_url_and_headers.assert_called_with(testurl)
 
+    @patch("azurelinuxagent.common.event.add_event")
+    def test_artifacts_profile_json_parsing(self, patch_event, *args):
+        wire_protocol_client = WireProtocol(wireserver_url).client
+        wire_protocol_client.ext_conf = ExtensionsConfig(None)
+        wire_protocol_client.ext_conf.artifacts_profile_blob = testurl
+        goal_state = GoalState(WireProtocolData(DATA_FILE).goal_state)
+        wire_protocol_client.get_goal_state = Mock(return_value=goal_state)
+
+        # response is invalid json
+        wire_protocol_client.call_storage_service = Mock(return_value=MockResponse("invalid json".encode('utf-8'), 200))
+        in_vm_artifacts_profile = wire_protocol_client.get_artifacts_profile()
+
+        # ensure response is empty
+        self.assertEqual(None, in_vm_artifacts_profile)
+
+        # ensure event is logged
+        self.assertEqual(1, patch_event.call_count)
+        self.assertFalse(patch_event.call_args[1]['is_success'])
+        self.assertTrue('invalid json' in patch_event.call_args[1]['message'])
+        self.assertEqual('ArtifactsProfileBlob', patch_event.call_args[1]['op'])
 
     def test_get_in_vm_artifacts_profile_default(self, *args):
         wire_protocol_client = WireProtocol(wireserver_url).client
@@ -310,8 +363,7 @@ class TestWireProtocol(AgentTestCase):
         self.assertEqual(dict(onHold='true'), in_vm_artifacts_profile.__dict__)
         self.assertTrue(in_vm_artifacts_profile.is_on_hold())
 
-    @patch("time.sleep")
-    def test_fetch_manifest_fallback(self, patch_sleep,  *args):
+    def test_fetch_manifest_fallback(self, *args):
         uri1 = ExtHandlerVersionUri()
         uri1.uri = 'ext_uri'
         uris = DataContractList(ExtHandlerVersionUri)
@@ -342,7 +394,7 @@ class TestWireProtocol(AgentTestCase):
         wire_protocol_client.ext_conf.artifacts_profile_blob = testurl
         goal_state = GoalState(WireProtocolData(DATA_FILE).goal_state)
         wire_protocol_client.get_goal_state = Mock(return_value=goal_state)
-        wire_protocol_client.fetch = Mock(side_effect=[None, '{"onHold": "true"}'.encode('utf-8')])
+        wire_protocol_client.fetch = Mock(side_effect=[None, '{"onHold": "true"}'])
         with patch.object(HostPluginProtocol,
                           "get_artifact_request",
                           return_value=['dummy_url', {}]) as artifact_request:

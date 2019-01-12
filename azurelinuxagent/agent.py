@@ -1,6 +1,6 @@
 # Microsoft Azure Linux Agent
 #
-# Copyright 2014 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Requires Python 2.4+ and Openssl 1.0+
+# Requires Python 2.6+ and Openssl 1.0+
 #
 
 """
@@ -37,6 +37,7 @@ from azurelinuxagent.common.version import AGENT_NAME, AGENT_LONG_VERSION, \
                                      PY_VERSION_MAJOR, PY_VERSION_MINOR, \
                                      PY_VERSION_MICRO, GOAL_STATE_AGENT_VERSION
 from azurelinuxagent.common.osutil import get_osutil
+from azurelinuxagent.common.utils import fileutil
 
 class Agent(object):
     def __init__(self, verbose, conf_file_path=None):
@@ -63,13 +64,17 @@ class Agent(object):
                                  path="/var/log/waagent.log")
         logger.add_logger_appender(logger.AppenderType.CONSOLE, level,
                                  path="/dev/console")
+        # See issue #1035
+        # logger.add_logger_appender(logger.AppenderType.TELEMETRY,
+        #                            logger.LogLevel.WARNING,
+        #                            path=event.add_log_event)
 
         ext_log_dir = conf.get_ext_log_dir()
         try:
             if os.path.isfile(ext_log_dir):
                 raise Exception("{0} is a file".format(ext_log_dir))
             if not os.path.isdir(ext_log_dir):
-                os.makedirs(ext_log_dir)
+                fileutil.mkdir(ext_log_dir, mode=0o755, owner="root")
         except Exception as e:
             logger.error(
                 "Exception occurred while creating extension "
@@ -85,6 +90,7 @@ class Agent(object):
         """
         Run agent daemon
         """
+        logger.set_prefix("Daemon")
         child_args = None \
             if self.conf_file_path is None \
                 else "-configuration-path:{0}".format(self.conf_file_path)
@@ -124,6 +130,7 @@ class Agent(object):
         """
         Run the update and extension handler
         """
+        logger.set_prefix("ExtHandler")
         from azurelinuxagent.ga.update import get_update_handler
         update_handler = get_update_handler()
         update_handler.run()
@@ -144,7 +151,7 @@ def main(args=[]):
     if command == "version":
         version()
     elif command == "help":
-        usage()
+        print(usage())
     elif command == "start":
         start(conf_file_path=conf_file_path)
     else:
@@ -228,15 +235,16 @@ def version():
 
 def usage():
     """
-    Show agent usage
+    Return agent usage message
     """
-    print("")
-    print((("usage: {0} [-verbose] [-force] [-help] "
+    s  = "\n"
+    s += ("usage: {0} [-verbose] [-force] [-help] "
            "-configuration-path:<path to configuration file>"
            "-deprovision[+user]|-register-service|-version|-daemon|-start|"
-           "-run-exthandlers]"
-           "").format(sys.argv[0])))
-    print("")
+           "-run-exthandlers|-show-configuration]"
+           "").format(sys.argv[0])
+    s += "\n"
+    return s
 
 def start(conf_file_path=None):
     """
