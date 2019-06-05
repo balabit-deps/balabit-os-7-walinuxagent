@@ -1,13 +1,19 @@
-walinuxagent (2.2.32-0ubuntu1~18.04.2) bionic-security; urgency=medium
- 
+walinuxagent (2.2.40-0ubuntu1~18.04.1) bionic; urgency=medium
+
+  * New upstream release (LP: #1827995)
+  * debian/patches/CVE-2019-0804.patch: dropped; included in upstream release.
+
+ -- Mathieu Trudel-Lapierre <cyphermox@ubuntu.com>  Wed, 05 Jun 2019 15:26:47 -0400
+
+walinuxagent (2.2.32-0ubuntu2) disco; urgency=medium
+
   * debian/patches/CVE-2019-0804.patch:
     - Cherry-pick fixes from upstream for handling swap file.
 
- -- Łukasz 'sil2100' Zemczak <lukasz.zemczak@ubuntu.com>  Mon, 11 Mar 2019 13:39:32 +0100
+ -- Łukasz 'sil2100' Zemczak <lukasz.zemczak@ubuntu.com>  Mon, 11 Mar 2019 09:30:11 +0100
 
-walinuxagent (2.2.32-0ubuntu1~18.04.1) bionic; urgency=medium
+walinuxagent (2.2.32-0ubuntu1) disco; urgency=medium
 
-  * Backport of the disco version.
   * New upstream release (LP: #1799498).
   * debian/patches/disable_import_test.patch: refreshed patch.
   * debian/control:

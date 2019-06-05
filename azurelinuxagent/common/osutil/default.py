@@ -114,7 +114,7 @@ class DefaultOSUtil(object):
         try:
             wait = self.get_firewall_will_wait()
 
-            rc, output = shellutil.run_get_output(FIREWALL_PACKETS.format(wait), log_cmd=False)
+            rc, output = shellutil.run_get_output(FIREWALL_PACKETS.format(wait), log_cmd=False, expected_errors=[3])
             if rc == 3:
                 # Transient error  that we ignore.  This code fires every loop
                 # of the daemon (60m), so we will get the value eventually.
@@ -257,7 +257,8 @@ class DefaultOSUtil(object):
                         "{0}".format(ustr(e)))
             return False
 
-    def _correct_instance_id(self, id):
+    @staticmethod
+    def _correct_instance_id(id):
         '''
         Azure stores the instance ID with an incorrect byte ordering for the
         first parts. For example, the ID returned by the metadata service:
@@ -290,8 +291,10 @@ class DefaultOSUtil(object):
         may have been persisted using the incorrect byte ordering.
         '''
         id_this = self.get_instance_id()
-        return id_that == id_this or \
-            id_that == self._correct_instance_id(id_this)
+        logger.verbose("current instance id: {0}".format(id_this))
+        logger.verbose(" former instance id: {0}".format(id_that))
+        return id_this.lower() == id_that.lower() or \
+            id_this.lower() == self._correct_instance_id(id_that).lower()
 
     @staticmethod
     def is_cgroups_supported():
@@ -362,7 +365,8 @@ class DefaultOSUtil(object):
               
         return self._correct_instance_id(s.strip())
 
-    def get_userentry(self, username):
+    @staticmethod
+    def get_userentry(username):
         try:
             return pwd.getpwnam(username)
         except KeyError:
@@ -473,7 +477,8 @@ class DefaultOSUtil(object):
         except IOError as e:
             raise OSUtilError("Failed to delete root password:{0}".format(e))
 
-    def _norm_path(self, filepath):
+    @staticmethod
+    def _norm_path(filepath):
         home = conf.get_home_dir()
         # Expand HOME variable if present in path
         path = os.path.normpath(filepath.replace("$HOME", home))
@@ -521,6 +526,8 @@ class DefaultOSUtil(object):
         if value is not None:
             if not value.startswith("ssh-"):
                 raise OSUtilError("Bad public key: {0}".format(value))
+            if not value.endswith("\n"):
+                value += "\n"
             fileutil.write_file(path, value)
         elif thumbprint is not None:
             lib_dir = conf.get_lib_dir()
@@ -842,7 +849,8 @@ class DefaultOSUtil(object):
                 route_list.append(route_obj)
         return route_list
 
-    def read_route_table(self):
+    @staticmethod
+    def read_route_table():
         """
         Return a list of strings comprising the route table, including column headers. Each line is stripped of leading
         or trailing whitespace but is otherwise unmolested.
@@ -858,7 +866,8 @@ class DefaultOSUtil(object):
 
         return []
 
-    def get_list_of_routes(self, route_table):
+    @staticmethod
+    def get_list_of_routes(route_table):
         """
         Construct a list of all network routes known to this system.
 
@@ -888,43 +897,26 @@ class DefaultOSUtil(object):
         RTF_GATEWAY = 0x02
         DEFAULT_DEST = "00000000"
 
-        hdr_iface = "Iface"
-        hdr_dest = "Destination"
-        hdr_flags = "Flags"
-        hdr_metric = "Metric"
-
-        idx_iface = -1
-        idx_dest = -1
-        idx_flags = -1
-        idx_metric = -1
-        primary = None
-        primary_metric = None
+        primary_interface = None
 
         if not self.disable_route_warning:
             logger.info("Examine /proc/net/route for primary interface")
-        with open('/proc/net/route') as routing_table:
-            idx = 0
-            for header in filter(lambda h: len(h) > 0, routing_table.readline().strip(" \n").split("\t")):
-                if header == hdr_iface:
-                    idx_iface = idx
-                elif header == hdr_dest:
-                    idx_dest = idx
-                elif header == hdr_flags:
-                    idx_flags = idx
-                elif header == hdr_metric:
-                    idx_metric = idx
-                idx = idx + 1
-            for entry in routing_table.readlines():
-                route = entry.strip(" \n").split("\t")
-                if route[idx_dest] == DEFAULT_DEST and int(route[idx_flags]) & RTF_GATEWAY == RTF_GATEWAY:
-                    metric = int(route[idx_metric])
-                    iface = route[idx_iface]
-                    if primary is None or metric < primary_metric:
-                        primary = iface
-                        primary_metric = metric
 
-        if primary is None:
-            primary = ''
+        route_table = DefaultOSUtil.read_route_table()
+
+        def is_default(route):
+            return route.destination == DEFAULT_DEST and int(route.flags) & RTF_GATEWAY == RTF_GATEWAY
+
+        candidates = list(filter(is_default, DefaultOSUtil.get_list_of_routes(route_table)))
+
+        if len(candidates) > 0:
+            def get_metric(route):
+                return int(route.metric)
+            primary_route = min(candidates, key=get_metric)
+            primary_interface = primary_route.interface
+
+        if primary_interface is None:
+            primary_interface = ''
             if not self.disable_route_warning:
                 with open('/proc/net/route') as routing_table_fh:
                     routing_table_text = routing_table_fh.read()
@@ -934,9 +926,9 @@ class DefaultOSUtil(object):
                     logger.warn('Primary interface examination will retry silently')
                     self.disable_route_warning = True
         else:
-            logger.info('Primary interface is [{0}]'.format(primary))
+            logger.info('Primary interface is [{0}]'.format(primary_interface))
             self.disable_route_warning = False
-        return primary
+        return primary_interface
 
     def is_primary_interface(self, ifname):
         """
@@ -1301,7 +1293,7 @@ class DefaultOSUtil(object):
         """
         state = {}
 
-        status, output = shellutil.run_get_output("ip -a -d -o link", chk_err=False, log_cmd=False)
+        status, output = shellutil.run_get_output("ip -a -o link", chk_err=False, log_cmd=False)
         """
         1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00 promiscuity 0 addrgenmode eui64
         2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode DEFAULT group default qlen 1000\    link/ether 00:0d:3a:30:c3:5a brd ff:ff:ff:ff:ff:ff promiscuity 0 addrgenmode eui64
@@ -1318,14 +1310,14 @@ class DefaultOSUtil(object):
                 name = result.group(1)
                 state[name] = NetworkInterfaceCard(name, result.group(2))
 
-        self._update_nic_state(state, "ip -4 -a -d -o address", NetworkInterfaceCard.add_ipv4, "an IPv4 address")
+        self._update_nic_state(state, "ip -4 -a -o address", NetworkInterfaceCard.add_ipv4, "an IPv4 address")
         """
         1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft forever preferred_lft forever
         2: eth0    inet 10.145.187.220/26 brd 10.145.187.255 scope global eth0\       valid_lft forever preferred_lft forever
         3: docker0    inet 192.168.43.1/24 brd 192.168.43.255 scope global docker0\       valid_lft forever preferred_lft forever
         """
 
-        self._update_nic_state(state, "ip -6 -a -d -o address", NetworkInterfaceCard.add_ipv6, "an IPv6 address")
+        self._update_nic_state(state, "ip -6 -a -o address", NetworkInterfaceCard.add_ipv6, "an IPv6 address")
         """
         1: lo    inet6 ::1/128 scope host \       valid_lft forever preferred_lft forever
         2: eth0    inet6 fe80::20d:3aff:fe30:c35a/64 scope link \       valid_lft forever preferred_lft forever
