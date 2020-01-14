@@ -1,4 +1,16 @@
-walinuxagent (2.2.40-0ubuntu1~18.04.1) bionic; urgency=medium
+walinuxagent (2.2.45-0ubuntu1~18.04.1) bionic; urgency=medium
+
+  * New upstream release (LP: #1851064)
+
+ -- Brian Murray <brian@ubuntu.com>  Tue, 14 Jan 2020 08:44:47 -0800
+
+walinuxagent (2.2.44-0ubuntu1) focal; urgency=medium
+
+  * New upstream release (LP: #1851064)
+
+ -- Mathieu Trudel-Lapierre <cyphermox@ubuntu.com>  Thu, 21 Nov 2019 10:19:10 -0500
+
+walinuxagent (2.2.40-0ubuntu1) eoan; urgency=medium
 
   * New upstream release (LP: #1827995)
   * debian/patches/CVE-2019-0804.patch: dropped; included in upstream release.
