@@ -16,7 +16,6 @@
 # Requires Python 2.6+ and Openssl 1.0+
 #
 
-import array
 import base64
 import datetime
 import errno
@@ -32,20 +31,21 @@ import socket
 import struct
 import sys
 import time
+from pwd import getpwall
 
-import azurelinuxagent.common.logger as logger
+import array
+
 import azurelinuxagent.common.conf as conf
+import azurelinuxagent.common.logger as logger
 import azurelinuxagent.common.utils.fileutil as fileutil
 import azurelinuxagent.common.utils.shellutil as shellutil
 import azurelinuxagent.common.utils.textutil as textutil
-
 from azurelinuxagent.common.exception import OSUtilError
 from azurelinuxagent.common.future import ustr
 from azurelinuxagent.common.utils.cryptutil import CryptUtil
 from azurelinuxagent.common.utils.flexible_version import FlexibleVersion
 from azurelinuxagent.common.utils.networkutil import RouteEntry, NetworkInterfaceCard
-
-from pwd import getpwall
+from azurelinuxagent.common.utils.shellutil import CommandError
 
 __RULES_FILES__ = [ "/lib/udev/rules.d/75-persistent-net-generator.rules",
                     "/etc/udev/rules.d/70-persistent-net.rules" ]
@@ -97,6 +97,8 @@ IP_COMMAND_OUTPUT = re.compile('^\d+:\s+(\w+):\s+(.*)$')
 
 BASE_CGROUPS = '/sys/fs/cgroup'
 
+STORAGE_DEVICE_PATH = '/sys/bus/vmbus/devices/'
+GEN2_DEVICE_ID = 'f8b3781a-1e82-4818-a1c3-63d806ec15bb'
 
 class DefaultOSUtil(object):
     def __init__(self):
@@ -104,6 +106,11 @@ class DefaultOSUtil(object):
         self.selinux = None
         self.disable_route_warning = False
         self.jit_enabled = False
+        self.service_name = self.get_service_name()
+
+    @staticmethod
+    def get_service_name():
+        return "waagent"
 
     def get_firewall_dropped_packets(self, dst_ip=None):
         # If a previous attempt failed, do not retry
@@ -299,12 +306,9 @@ class DefaultOSUtil(object):
     @staticmethod
     def is_cgroups_supported():
         """
-        Enabled by default; disabled in WSL/Travis
+        Enabled by default; disabled if the base path of cgroups doesn't exist.
         """
-        is_wsl = '-Microsoft-' in platform.platform()
-        is_travis = 'TRAVIS' in os.environ and os.environ['TRAVIS'] == 'true'
-        base_fs_exists = os.path.exists(BASE_CGROUPS)
-        return not is_wsl and not is_travis and base_fs_exists
+        return os.path.exists(BASE_CGROUPS)
 
     @staticmethod
     def _cgroup_path(tail=""):
@@ -320,22 +324,34 @@ class DefaultOSUtil(object):
                            option="-t tmpfs",
                            chk_err=False)
             elif not os.path.isdir(self._cgroup_path()):
-                logger.error("Could not mount cgroups: ordinary file at {0}".format(path))
+                logger.error("Could not mount cgroups: ordinary file at {0}", path)
                 return
 
-            for metric_hierarchy in ['cpu,cpuacct', 'memory']:
-                target_path = self._cgroup_path(metric_hierarchy)
-                if not os.path.exists(target_path):
-                    fileutil.mkdir(target_path)
-                    self.mount(device=metric_hierarchy,
-                               mount_point=target_path,
-                               option="-t cgroup -o {0}".format(metric_hierarchy),
-                               chk_err=False)
+            controllers_to_mount = ['cpu,cpuacct', 'memory']
+            errors = 0
+            cpu_mounted = False
+            for controller in controllers_to_mount:
+                try:
+                    target_path = self._cgroup_path(controller)
+                    if not os.path.exists(target_path):
+                        fileutil.mkdir(target_path)
+                        self.mount(device=controller,
+                                   mount_point=target_path,
+                                   option="-t cgroup -o {0}".format(controller),
+                                   chk_err=False)
+                        if controller == 'cpu,cpuacct':
+                            cpu_mounted = True
+                except Exception as exception:
+                    errors += 1
+                    if errors == len(controllers_to_mount):
+                        raise
+                    logger.warn("Could not mount cgroup controller {0}: {1}", controller, ustr(exception))
 
-            for metric_hierarchy in ['cpu', 'cpuacct']:
-                target_path = self._cgroup_path(metric_hierarchy)
-                if not os.path.exists(target_path):
-                    os.symlink(self._cgroup_path('cpu,cpuacct'), target_path)
+            if cpu_mounted:
+                for controller in ['cpu', 'cpuacct']:
+                    target_path = self._cgroup_path(controller)
+                    if not os.path.exists(target_path):
+                        os.symlink(self._cgroup_path('cpu,cpuacct'), target_path)
 
         except OSError as oe:
             # log a warning for read-only file systems
@@ -1092,9 +1108,19 @@ class DefaultOSUtil(object):
         cmd = "ip route add {0} via {1}".format(net, gateway)
         return shellutil.run(cmd, chk_err=False)
 
+    @staticmethod
+    def _text_to_pid_list(text):
+        return [int(n) for n in text.split()]
+
+    @staticmethod
+    def _get_dhcp_pid(command):
+        try:
+            return DefaultOSUtil._text_to_pid_list(shellutil.run_command(command))
+        except CommandError as exception:
+            return []
+
     def get_dhcp_pid(self):
-        ret = shellutil.run_get_output("pidof dhclient", chk_err=False)
-        return ret[1] if ret[0] == 0 else None
+        return self._get_dhcp_pid(["pidof", "dhclient"])
 
     def set_hostname(self, hostname):
         fileutil.write_file('/etc/hostname', hostname)
@@ -1116,7 +1142,7 @@ class DefaultOSUtil(object):
     def restart_if(self, ifname, retries=3, wait=5):
         retry_limit=retries+1
         for attempt in range(1, retry_limit):
-            return_code=shellutil.run("ifdown {0} && ifup {0}".format(ifname))
+            return_code=shellutil.run("ifdown {0} && ifup {0}".format(ifname), expected_errors=[1] if attempt < retries else [])
             if return_code == 0:
                 return
             logger.warn("failed to restart {0}: return code {1}".format(ifname, return_code))
@@ -1167,6 +1193,67 @@ class DefaultOSUtil(object):
                     return tokens[2] if len(tokens) > 2 else None
         return None
 
+    @staticmethod
+    def _enumerate_device_id():
+        """
+        Enumerate all storage device IDs.
+
+        Args:
+            None
+
+        Returns:
+            Iterator[Tuple[str, str]]: VmBus and storage devices.
+        """
+
+        if os.path.exists(STORAGE_DEVICE_PATH):
+            for vmbus in os.listdir(STORAGE_DEVICE_PATH):
+                deviceid = fileutil.read_file(os.path.join(STORAGE_DEVICE_PATH, vmbus, "device_id"))
+                guid = deviceid.strip('{}\n')
+                yield vmbus, guid
+
+    @staticmethod
+    def search_for_resource_disk(gen1_device_prefix, gen2_device_id):
+        """
+        Search the filesystem for a device by ID or prefix.
+
+        Args:
+            gen1_device_prefix (str): Gen1 resource disk prefix.
+            gen2_device_id (str): Gen2 resource device ID.
+
+        Returns:
+            str: The found device.
+        """
+
+        device = None
+        # We have to try device IDs for both Gen1 and Gen2 VMs.
+        logger.info('Searching gen1 prefix {0} or gen2 {1}'.format(gen1_device_prefix, gen2_device_id))
+        try:
+            for vmbus, guid in DefaultOSUtil._enumerate_device_id():
+                if guid.startswith(gen1_device_prefix) or guid == gen2_device_id:
+                    for root, dirs, files in os.walk(STORAGE_DEVICE_PATH + vmbus):
+                        root_path_parts = root.split('/')
+                        # For Gen1 VMs we only have to check for the block dir in the
+                        # current device. But for Gen2 VMs all of the disks (sda, sdb,
+                        # sr0) are presented in this device on the same SCSI controller.
+                        # Because of that we need to also read the LUN. It will be:
+                        #   0 - OS disk
+                        #   1 - Resource disk
+                        #   2 - CDROM
+                        if root_path_parts[-1] == 'block' and (
+                                guid != gen2_device_id or
+                                root_path_parts[-2].split(':')[-1] == '1'):
+                            device = dirs[0]
+                            return device
+                        else:
+                            # older distros
+                            for d in dirs:
+                                if ':' in d and "block" == d.split(':')[0]:
+                                    device = d.split(':')[1]
+                                    return device
+        except (OSError, IOError) as exc:
+            logger.warn('Error getting device for {0} or {1}: {2}', gen1_device_prefix, gen2_device_id, ustr(exc))
+        return None
+
     def device_for_ide_port(self, port_id):
         """
         Return device name attached to ide port 'n'.
@@ -1177,27 +1264,13 @@ class DefaultOSUtil(object):
         if port_id > 1:
             g0 = "00000001"
             port_id = port_id - 2
-        device = None
-        path = "/sys/bus/vmbus/devices/"
-        if os.path.exists(path):
-            try:
-                for vmbus in os.listdir(path):
-                    deviceid = fileutil.read_file(os.path.join(path, vmbus, "device_id"))
-                    guid = deviceid.lstrip('{').split('-')
-                    if guid[0] == g0 and guid[1] == "000" + ustr(port_id):
-                        for root, dirs, files in os.walk(path + vmbus):
-                            if root.endswith("/block"):
-                                device = dirs[0]
-                                break
-                            else:
-                                # older distros
-                                for d in dirs:
-                                    if ':' in d and "block" == d.split(':')[0]:
-                                        device = d.split(':')[1]
-                                        break
-                        break
-            except OSError as oe:
-                logger.warn('Could not obtain device for IDE port {0}: {1}', port_id, ustr(oe))
+
+        gen1_device_prefix = '{0}-000{1}'.format(g0, port_id)
+        device = DefaultOSUtil.search_for_resource_disk(
+            gen1_device_prefix=gen1_device_prefix,
+            gen2_device_id=GEN2_DEVICE_ID
+        )
+        logger.info('Found device: {0}'.format(device))
         return device
 
     def set_hostname_record(self, hostname):
@@ -1265,6 +1338,7 @@ class DefaultOSUtil(object):
             results = fileutil.read_file('/proc/stat')
         except (OSError, IOError) as ex:
             logger.warn("Couldn't read /proc/stat: {0}".format(ex.strerror))
+            raise
 
         return results
 

@@ -51,6 +51,16 @@ class AgentNetworkError(AgentError):
         super(AgentNetworkError, self).__init__(msg, inner)
 
 
+class CGroupsException(AgentError):
+
+    def __init__(self, msg, inner=None):
+        super(AgentError, self).__init__(msg, inner)
+        # TODO: AgentError should set the message - investigate whether doing it there would break anything
+        self.message = msg
+
+    def __str__(self):
+        return self.message
+
 class ExtensionError(AgentError):
     """
     When failed to execute an extension
@@ -61,6 +71,26 @@ class ExtensionError(AgentError):
         self.code = code
 
 
+class ExtensionOperationError(ExtensionError):
+    """
+    When the command times out or returns with a non-zero exit_code
+    """
+
+    def __init__(self, msg=None, inner=None, code=-1, exit_code=-1):
+        super(ExtensionOperationError, self).__init__(msg, inner)
+        self.code = code
+        self.exit_code = exit_code
+
+
+class ExtensionUpdateError(ExtensionError):
+    """
+    When failed to update an extension
+    """
+
+    def __init__(self, msg=None, inner=None, code=-1):
+        super(ExtensionUpdateError, self).__init__(msg, inner, code)
+
+
 class ExtensionDownloadError(ExtensionError):
     """
     When failed to download and setup an extension
@@ -68,15 +98,6 @@ class ExtensionDownloadError(ExtensionError):
 
     def __init__(self, msg=None, inner=None, code=-1):
         super(ExtensionDownloadError, self).__init__(msg, inner, code)
-
-
-class ExtensionOperationError(ExtensionError):
-    """
-    When failed to execute an extension
-    """
-
-    def __init__(self, msg=None, inner=None, code=-1):
-        super(ExtensionOperationError, self).__init__(msg, inner, code)
 
 
 class ProvisionError(AgentError):
@@ -140,6 +161,15 @@ class HttpError(AgentError):
 
     def __init__(self, msg=None, inner=None):
         super(HttpError, self).__init__(msg, inner)
+
+
+class InvalidContainerError(HttpError):
+    """
+    Container id sent in the header is invalid
+    """
+
+    def __init__(self, msg=None, inner=None):
+        super(InvalidContainerError, self).__init__(msg, inner)
 
 
 class EventError(AgentError):
